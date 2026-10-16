@@ -81,7 +81,9 @@ final class Store: NSObject {
             guard let toast, toast != oldValue else { return }
             emit(.ui)
             toastTask?.cancel()
-            toastTask = Task { [weak self] in
+            // @MainActor: a plain Task would resume on the cooperative pool and the
+            // expiry below would rewrite the status bar from off the main thread.
+            toastTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 2_600_000_000)
                 guard let self, !Task.isCancelled else { return }
                 if self.toast == toast { self.toast = nil; self.emit(.ui) }
@@ -115,7 +117,14 @@ final class Store: NSObject {
         handlers[event, default: []].append(handler)
     }
 
+    /// Observers touch AppKit directly (table reload, web view, status bar), so they
+    /// always run on the main thread. Anything emitted from a background task hops
+    /// first instead of mutating a view hierarchy from two threads at once.
     private func emit(_ event: StoreEvent) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.emit(event) }
+            return
+        }
         handlers[event]?.forEach { $0() }
     }
 
@@ -382,7 +391,10 @@ final class Store: NSObject {
     private func scheduleSave() {
         guard autosaveEnabled, isDirty else { return }
         pendingSave?.cancel()
-        pendingSave = Task { [weak self] in
+        // @MainActor matters: a bare Task resumes on the cooperative thread pool, and
+        // write() then emits straight into sidebar.reloadData() — which is exactly the
+        // off-main AppKit call that crashed a saved note (CoreAutoLayout abort).
+        pendingSave = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 700_000_000)
             guard let self, !Task.isCancelled else { return }
             self.write()

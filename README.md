@@ -71,6 +71,264 @@ cd MarkNote
 
 동봉 버전과 라이선스: Mermaid 10.9.3(MIT), highlight.js 11.9.0(BSD-3-Clause), KaTeX 0.16.11(MIT). 원본 라이선스 전문은 `Resources/vendor/licenses/`, 파일별 sha256과 출처는 `Resources/vendor/manifest.json`에 있습니다.
 
+## 예제 — 복사해서 붙여넣기
+
+아래 블록들은 이 앱에서 실제로 렌더링되는지 확인한 원문입니다. 코드 블록 우측 상단의 복사 버튼을 누르면 감싸는 백틱 없이 안쪽만 복사됩니다. 모든 예제가 한 파일에 담긴 [`docs/예제-모음.md`](docs/예제-모음.md)를 MarkNote로 열면 원문과 결과를 나란히 볼 수 있습니다.
+
+### 서식
+
+````markdown
+**굵게**, *기울임*, ~~취소선~~, `인라인 코드`, {{형광펜}}, [링크](https://example.com), <https://example.com>
+````
+
+### 목록과 표
+
+````markdown
+- 글머리
+  - 들여쓰면 하위 목록
+    - 세 단계도 됩니다
+- [ ] 할 일
+- [x] 끝난 일
+
+1. 번호 목록
+2. 아래로 들여쓰면 종류를 바꿔도 됩니다
+   - 안쪽 글머리
+   1. 안쪽 번호
+
+| 기능 | 단축키 | 상태 |
+| --- | :--: | --- |
+| 미리보기 토글 | `⌘R` | 됨 |
+| 시각화 포함 내보내기 | `⌥⇧⌘E` | 됨 |
+````
+
+### 코드 블록
+
+펜스 뒤에 붙이는 라벨이 하이라이트 언어를 결정합니다. 라벨이 없으면 색상 없이 그대로 표시됩니다.
+
+````markdown
+```swift
+func save(_ doc: Note) throws {
+    // 한글 주석도 그대로
+    try doc.write(to: url, atomically: true)
+}
+```
+
+```python
+def fib(n):
+    a, b = 0, 1
+    for _ in range(n):
+        a, b = b, a + b
+    return a
+```
+
+```sql
+SELECT title, updated_at
+FROM docs
+WHERE folder = 'MarkNote'
+ORDER BY updated_at DESC;
+```
+
+```bash
+./build.sh --install --open   # 빌드 후 ~/Applications에 설치
+```
+
+```json
+{ "name": "MarkNote", "offline": true }
+```
+````
+
+쓸 수 있는 언어 라벨(36개): `bash` `c` `cpp` `csharp` `css` `diff` `go` `graphql` `ini` `java` `javascript` `json` `kotlin` `less` `lua` `makefile` `markdown` `objectivec` `perl` `php` `php-template` `plaintext` `python` `python-repl` `r` `ruby` `rust` `scss` `shell` `sql` `swift` `typescript` `vbnet` `wasm` `xml` `yaml`
+
+줄임말도 인식합니다: `js` `jsx` `ts` `tsx` `py` `pycon` `rb` `yml` `md` `sh` `console` `c++` `cs` `html` `svg` `toml` `text` `rs` `kt` `objc` `vb` `golang` `make` `patch` `gql`
+
+### LaTeX 수식
+
+````markdown
+인라인: $E = mc^2$, $\frac{a}{b}$, $\sqrt{x}$, $\alpha\beta\gamma$, $\sum_{i=1}^{n} i$
+
+$$\int_0^1 x^2\,dx = \frac{1}{3}$$
+
+$$\lim_{n\to\infty}\left(1+\frac{1}{n}\right)^n = e$$
+
+$$\mathbf{A} = \begin{pmatrix} a & b \\ c & d \end{pmatrix}, \quad \begin{bmatrix} 1 \\ 2 \end{bmatrix}$$
+
+$$f(x) = \begin{cases} 1 & x \gt 0 \\ -1 & x \lt 0 \end{cases}$$
+
+$$\overline{x} \ne \underline{x}, \quad \left\lceil \frac{n}{2} \right\rceil, \quad \boxed{42}$$
+````
+
+`$$ … $$` 대신 `\( … \)`(인라인)과 `\[ … \]`(블록)도 인식합니다. 달러표를 글자로 쓰려면 `\$`로 이스케이프하세요 — `가격은 $5와 $10` 같은 문장은 수식으로 잡힙니다.
+
+### 다이어그램
+
+`flowchart`, `graph`, `sequenceDiagram`, `classDiagram`, `stateDiagram-v2`, `erDiagram`, `gantt`, `pie`, `journey`, `mindmap`, `timeline`, `quadrantChart`, `gitGraph`, `xychart-beta`, `sankey-beta`, `block-beta` 열여섯 종류가 확인됐습니다. 라벨에 한글을 써도 됩니다.
+
+````markdown
+```mermaid
+flowchart LR
+  A[시작] --> B{검사}
+  B -->|통과| C[완료]
+  B -->|실패| D[재시도]
+  D --> B
+```
+````
+
+````markdown
+```mermaid
+sequenceDiagram
+  사용자->>앱: 문서 열기
+  앱-->>사용자: 렌더링된 미리보기
+  Note over 앱: 0.14초 뒤 갱신
+```
+````
+
+````markdown
+```mermaid
+classDiagram
+  Doc <|-- Note
+  class Doc {
+    +URL url
+    +save()
+  }
+```
+````
+
+````markdown
+```mermaid
+stateDiagram-v2
+  [*] --> 편집
+  편집 --> 저장: ⌘S
+  저장 --> 편집: 입력
+  저장 --> [*]
+```
+````
+
+````markdown
+```mermaid
+erDiagram
+  FOLDER ||--o{ DOC : contains
+  DOC {
+    string title
+    date updated
+  }
+```
+````
+
+````markdown
+```mermaid
+gantt
+  title 릴리스 계획
+  dateFormat YYYY-MM-DD
+  section 개발
+  렌더러       :a1, 2026-10-01, 7d
+  section 검수
+  문서화         :after a1, 3d
+```
+````
+
+````markdown
+```mermaid
+pie showData
+  "머메이드" : 42
+  "수식" : 33
+  "코드" : 25
+```
+````
+
+````markdown
+```mermaid
+journey
+  title 노트 작성 여정
+  섹션: 5: 작성자: 편집
+  섹션: 4: 작성자: 미리보기 확인
+```
+````
+
+````markdown
+```mermaid
+mindmap
+  root((MarkNote))
+    편집
+      단축키
+    렌더링
+      머메이드
+      KaTeX
+```
+````
+
+````markdown
+```mermaid
+timeline
+  title 버전
+  2026-10 : v1.0 공개 : 벤더 동봉
+```
+````
+
+````markdown
+```mermaid
+quadrantChart
+  title Reach vs Effort
+  x-axis Low --> High
+  y-axis Easy --> Hard
+  Quick win: [0.3, 0.9]
+  Backlog: [0.7, 0.3]
+```
+````
+
+````markdown
+```mermaid
+gitGraph
+  commit
+  branch feature
+  checkout feature
+  commit
+  checkout main
+  merge feature
+```
+````
+
+````markdown
+```mermaid
+xychart-beta
+  title "저장 지연"
+  x-axis [1, 2, 3, 4]
+  y-axis "ms" 0 --> 800
+  bar [120, 300, 700, 210]
+```
+````
+
+````markdown
+```mermaid
+sankey-beta
+
+source,target,value
+
+Editor,Preview,70
+Editor,Export,30
+```
+````
+
+````markdown
+```mermaid
+block-beta
+  columns 1
+  a["편집"]
+  b["렌더"]
+  a --> b
+```
+````
+
+`packet-beta`, `architecture-beta`, `ishikawa-beta`, `kanban`, `requirementDiagram`은 동봉된 10.9.3 UMD 빌드에 포함되어 있지 않습니다. 이 경우 다이어그램은 그림 대신 원문 텍스트 카드로 남으니 내용은 잃지 않습니다.
+
+### 이미지와 노트 링크
+
+````markdown
+![사진](photo.png)
+[다른 노트](other.md)
+````
+
+미리보기는 열어 둔 문서의 폴더를 기준으로 삼습니다. 다른 노트 링크를 클릭하면 편집기가 그 파일을 엽니다.
+
 ## 저장소 구성
 
 ```
@@ -88,6 +346,7 @@ Sources/
   Utils.swift, Welcome.swift
 Resources/vendor/      mermaid · highlight.js · KaTeX 사본 + 웹폰트 + 라이선스 (3.9 MB)
 docs/screenshot.png    README 미리보기 이미지
+docs/예제-모음.md      복사해서 쓰는 예제 원문(그대로 열 수도 있는 노트)
 Info.plist             문서 타입 등록(.md, .markdown, .mdown)
 build.sh               컴파일 → 벤더 복사 → 서명 → 설치
 ```

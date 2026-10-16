@@ -225,46 +225,39 @@ extension Vendor {
               } catch (e) {}
             }
             if (window.mermaid) {
-              // NOTE: mermaid skips elements it has already marked data-processed,
-              // so our own guard attribute is used for re-entrancy instead.
+              // One call per diagram: mermaid rejects the whole batch when a single
+              // block fails to parse, and it skips elements already marked
+              // data-processed — so re-entrancy uses our own attribute.
               var pending = root.querySelectorAll('.mermaid');
-              var todo = [];
-              var source = [];
               for (var j = 0; j < pending.length; j++) {
-                var node = pending[j];
-                if (node.querySelector('svg') || node.getAttribute('data-mn-run') === '1') continue;
-                todo.push(node);
-                source.push(node.textContent);
-              }
-              if (todo.length) {
-                for (var k = 0; k < todo.length; k++) todo[k].setAttribute('data-mn-run', '1');
-                var park = function () {
-                  for (var m = 0; m < todo.length; m++) {
-                    var n = todo[m];
-                    n.setAttribute('data-mn-run', '0');
-                    if (n.classList.contains('render-failed')) continue;
-                    n.classList.add('render-failed');
-                    // A parse failure leaves mermaid's error picture behind; put the
-                    // readable source back so the card says what was actually typed.
-                    if (!n.querySelector('svg')) n.textContent = source[m];
+                (function (node) {
+                  if (node.querySelector('svg') || node.getAttribute('data-mn-run') === '1') return;
+                  node.setAttribute('data-mn-run', '1');
+                  var source = node.textContent;
+                  var park = function (err) {
+                    node.setAttribute('data-mn-run', '0');
+                    node.classList.add('render-failed');
+                    if (err) {
+                      var msg = String((err.message || err)).split('\n')[0].slice(0, 160);
+                      if (!window.__mermaidError) window.__mermaidError = msg;
+                      node.setAttribute('data-mn-error', msg);
+                    }
+                    // A parse failure may leave mermaid's own error picture behind;
+                    // when nothing was drawn, put the readable source back.
+                    if (!node.querySelector('svg')) node.textContent = source;
+                  };
+                  var settle = function () {
+                    if (node.querySelector('svg')) node.setAttribute('data-mn-run', '1');
+                    else park(null);
+                  };
+                  try {
+                    var result = window.mermaid.run({ nodes: [node] });
+                    if (result && typeof result.then === 'function') result.then(settle, park);
+                    else settle();
+                  } catch (e) {
+                    park(e);
                   }
-                };
-                try {
-                  var result = window.mermaid.run({ nodes: todo });
-                  if (result && typeof result.then === 'function') {
-                    result.then(function () {
-                      for (var m = 0; m < todo.length; m++) {
-                        if (!todo[m].querySelector('svg')) park();
-                      }
-                    }, function (err) {
-                      window.__mermaidError = String((err && err.message) || err);
-                      park();
-                    });
-                  }
-                } catch (e) {
-                  window.__mermaidError = String((e && e.message) || e);
-                  park();
-                }
+                })(pending[j]);
               }
             }
           }

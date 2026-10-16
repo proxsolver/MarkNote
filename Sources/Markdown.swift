@@ -108,53 +108,51 @@ enum Markdown {
                 continue
             }
 
-            // Lists (unordered / ordered, with task checkboxes)
-            if let marker = listMarker(trimmed) {
+            // Lists (unordered / ordered / nested, with task checkboxes)
+            if listMarker(trimmed) != nil {
                 flush()
-                let ordered = marker.ordered
-                var items: [(text: String, task: String?)] = []
+                var items: [ListItem] = []
+                var open: [Int] = []          // indentation of each currently open level
                 while i < lines.count {
-                    let t = lines[i].trimmingCharacters(in: .whitespaces)
+                    let line = lines[i]
+                    let t = line.trimmingCharacters(in: .whitespaces)
+
                     if t.isEmpty {
-                        // A blank line only ends the list if the next line is not a continuation.
+                        // A blank line only ends the list when what follows is not list content.
                         var j = i + 1
                         while j < lines.count, lines[j].trimmingCharacters(in: .whitespaces).isEmpty { j += 1 }
                         if j >= lines.count { break }
                         let next = lines[j].trimmingCharacters(in: .whitespaces)
-                        if listMarker(next) == nil { break }
+                        guard listMarker(next) != nil || indentOf(lines[j]) >= 2 else { break }
                         i = j
                         continue
                     }
-                    guard let m = listMarker(t), m.ordered == ordered else {
-                        // lazy continuation of the previous item
-                        if !t.hasPrefix("#"), items.isEmpty == false {
-                            items[items.count - 1].text += " " + t
-                            i += 1
-                            continue
+
+                    let ind = indentOf(line)
+                    if let m = listMarker(t) {
+                        if open.isEmpty {
+                            open.append(ind)
+                        } else {
+                            while open.count > 1, ind < open.last! { open.removeLast() }
+                            if ind > open.last! { open.append(ind) }
                         }
+                        var body = m.body
+                        var task: String? = nil
+                        if body.hasPrefix("[ ]") { task = " "; body = String(body.dropFirst(3)).trimmingCharacters(in: .whitespaces) }
+                        else if body.lowercased().hasPrefix("[x]") { task = "x"; body = String(body.dropFirst(3)).trimmingCharacters(in: .whitespaces) }
+                        items.append(ListItem(depth: open.count - 1, ordered: m.ordered, body: body, task: task))
+                    } else if !items.isEmpty, ind >= 2, !t.hasPrefix("#"), !isRule(t), !t.hasPrefix(">") {
+                        // Indented prose continues the item directly above it.
+                        items[items.count - 1].body += " " + t
+                    } else {
                         break
                     }
-                    var body = m.body
-                    var task: String? = nil
-                    if body.hasPrefix("[ ]") { task = " "; body = String(body.dropFirst(3)).trimmingCharacters(in: .whitespaces) }
-                    else if body.lowercased().hasPrefix("[x]") { task = "x"; body = String(body.dropFirst(3)).trimmingCharacters(in: .whitespaces) }
-                    items.append((body, task))
                     i += 1
                 }
-                let tag = ordered ? "ol" : "ul"
-                var html = "<\(tag)>\n"
-                for item in items {
-                    let content: String
-                    if let task = item.task {
-                        let checked = task.lowercased() == "x" ? " checked" : ""
-                        content = "<label><input type=\"checkbox\" disabled\(checked)> <span>\(renderInline(item.text))</span></label>"
-                    } else {
-                        content = renderInline(item.text)
-                    }
-                    html += "<li>\(content)</li>\n"
+                var at = 0
+                while at < items.count {
+                    out.append(renderList(items, &at))
                 }
-                html += "</\(tag)>"
-                out.append(html)
                 continue
             }
 
@@ -311,6 +309,57 @@ enum Markdown {
         let stripped = t.replacingOccurrences(of: " ", with: "")
         guard stripped.count >= 3 else { return false }
         return stripped.allSatisfy { $0 == "-" } || stripped.allSatisfy { $0 == "*" } || stripped.allSatisfy { $0 == "_" }
+    }
+
+    /// Leading indentation of a raw line, in columns (a tab counts as four).
+    private static func indentOf(_ line: String) -> Int {
+        var width = 0
+        for ch in line {
+            if ch == " " { width += 1 }
+            else if ch == "\t" { width += 4 }
+            else { break }
+        }
+        return width
+    }
+
+    /// One list line with its nesting depth already resolved.
+    private struct ListItem {
+        let depth: Int
+        let ordered: Bool
+        var body: String
+        let task: String?
+    }
+
+    /// Renders one list level — including the levels nested inside it — and moves
+    /// `at` past every item it consumed. A same-depth change of list type closes
+    /// this list so the caller can open a sibling.
+    private static func renderList(_ items: [ListItem], _ at: inout Int) -> String {
+        let depth = items[at].depth
+        let ordered = items[at].ordered
+        var html = "<\(ordered ? "ol" : "ul")>\n"
+        while at < items.count {
+            let item = items[at]
+            // A dedent belongs to the list above; a deeper item or a change of list
+            // type ends this run so the caller can open the right sibling.
+            if item.depth != depth || item.ordered != ordered { break }
+            at += 1
+
+            var inner: String
+            if let task = item.task {
+                let checked = task.lowercased() == "x" ? " checked" : ""
+                inner = "<label><input type=\"checkbox\" disabled\(checked)> <span>\(renderInline(item.body))</span></label>"
+            } else {
+                inner = renderInline(item.body)
+            }
+            // Everything deeper than this level nests in the item — as several
+            // sibling lists when the writer switched between `-` and `1.` below it.
+            while at < items.count, items[at].depth > depth {
+                inner += "\n" + renderList(items, &at)
+            }
+            html += "<li>\(inner)</li>\n"
+        }
+        html += "</\(ordered ? "ol" : "ul")>"
+        return html
     }
 
     private static func listMarker(_ t: String) -> (ordered: Bool, body: String)? {

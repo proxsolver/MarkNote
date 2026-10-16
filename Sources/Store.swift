@@ -27,6 +27,7 @@ private enum Keys {
     static let fontSize = "editorFontSize"
     static let autosave = "autosaveEnabled"
     static let sync = "scrollSync"
+    static let visual = "visualEnabled"
 }
 
 /// All app state and file work lives here. Views subscribe with `on(_:)`.
@@ -62,6 +63,15 @@ final class Store: NSObject {
         didSet { defaults.set(scrollSync, forKey: Keys.sync); emit(.ui) }
     }
 
+    /// Mermaid / 코드 색상 / 수식 렌더링. 꺼 두면 순수 텍스트 미리보기로 돌아갑니다.
+    var visualEnabled: Bool {
+        didSet {
+            defaults.set(visualEnabled, forKey: Keys.visual)
+            emit(.document)
+            emit(.ui)
+        }
+    }
+
     var fontSize: CGFloat {
         didSet { defaults.set(Double(fontSize), forKey: Keys.fontSize); Theme.size = fontSize; emit(.ui) }
     }
@@ -93,6 +103,7 @@ final class Store: NSObject {
         previewVisible = defaults.object(forKey: Keys.preview) as? Bool ?? true
         autosaveEnabled = defaults.object(forKey: Keys.autosave) as? Bool ?? true
         scrollSync = defaults.object(forKey: Keys.sync) as? Bool ?? true
+        visualEnabled = defaults.object(forKey: Keys.visual) as? Bool ?? true
         fontSize = defaults.object(forKey: Keys.fontSize) as? CGFloat ?? 14
         super.init()
         Theme.size = fontSize
@@ -501,19 +512,38 @@ final class Store: NSObject {
     // MARK: - Export
 
     func exportHTML() {
+        saveExport(visual: .off)
+    }
+
+    /// Same file, but with the offline renderer stack embedded so diagrams,
+    /// code colours and math survive outside this app.
+    func exportHTMLRich() {
+        guard Vendor.available else {
+            toast = "렌더러 번들이 없어 가벼운 HTML만 내보냅니다"
+            saveExport(visual: .off)
+            return
+        }
+        saveExport(visual: .inlined)
+    }
+
+    private func saveExport(visual: Markdown.Visual) {
         guard let doc = current else { return }
         flush()
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.html]
         panel.nameFieldStringValue = doc.title + ".html"
-        panel.directoryURL = folder ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        panel.directoryURL = doc.url.deletingLastPathComponent()
+        if visual != .off {
+            panel.message = "그림·수식을 HTML 안에 직접 포함합니다 (약 4MB, 이미지는 문서 폴더에 둘 때만 열립니다)"
+        }
         present(panel) { [weak self] url in
             guard let self, let url else { return }
             let html = Markdown.page(title: doc.title, body: Markdown.toHTML(self.text),
-                                     dark: Theme.isDark, docBaseURL: doc.url)
+                                     dark: Theme.isDark, docBaseURL: doc.url, visual: visual)
             do {
                 try html.write(to: url, atomically: true, encoding: .utf8)
-                self.toast = "HTML 내보냄 · \(url.lastPathComponent)"
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                self.toast = "HTML 내보냄 · \(url.lastPathComponent) · \(ByteCount(size))"
             } catch {
                 self.toast = "내보내기 실패: \(error.localizedDescription)"
             }
@@ -522,10 +552,18 @@ final class Store: NSObject {
 
     func openInBrowser() {
         guard let doc = current else { return }
-        let html = Markdown.page(title: doc.title, body: Markdown.toHTML(text), dark: Theme.isDark, docBaseURL: doc.url)
+        let mode: Markdown.Visual = (visualEnabled && Vendor.available) ? .inlined : .off
+        let html = Markdown.page(title: doc.title, body: Markdown.toHTML(text),
+                                 dark: Theme.isDark, docBaseURL: doc.url, visual: mode)
+        // Temp folder, so relative image paths have to be pinned to the note's own folder.
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent(doc.title + ".html")
-        try? html.write(to: temp, atomically: true, encoding: .utf8)
-        NSWorkspace.shared.open(temp)
+        do {
+            try Markdown.absolutize(html, docURL: doc.url).write(to: temp, atomically: true, encoding: .utf8)
+            NSWorkspace.shared.open(temp)
+            toast = "브라우저에서 열었습니다"
+        } catch {
+            toast = "임시 파일 쓰기 실패: \(error.localizedDescription)"
+        }
     }
 
     func copyPlainMarkdown() {

@@ -303,6 +303,7 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
         case .exportMenu:
             let menu = NSMenu()
             menu.addItem(withTitle: "HTML로 내보내기…", action: #selector(exportHTML(_:)), keyEquivalent: "")
+            menu.addItem(withTitle: "시각화 포함 HTML 내보내기…", action: #selector(exportHTMLRich(_:)), keyEquivalent: "")
             menu.addItem(withTitle: "브라우저로 미리보기", action: #selector(openInBrowser(_:)), keyEquivalent: "")
             menu.addItem(withTitle: "HTML로 복사", action: #selector(copyHTML(_:)), keyEquivalent: "")
             menu.addItem(.separator())
@@ -340,6 +341,7 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
     @objc func revealInFinder(_ sender: Any?) { store.revealInFinder() }
     @objc func openFolderInFinder(_ sender: Any?) { store.openFolderInFinder() }
     @objc func exportHTML(_ sender: Any?) { store.exportHTML() }
+    @objc func exportHTMLRich(_ sender: Any?) { store.exportHTMLRich() }
     @objc func openInBrowser(_ sender: Any?) { store.openInBrowser() }
     @objc func copyHTML(_ sender: Any?) { store.copyHTML() }
     @objc func copyMarkdown(_ sender: Any?) { store.copyPlainMarkdown() }
@@ -361,6 +363,7 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
 
     @objc func togglePreview(_ sender: Any?) { store.togglePreview() }
     @objc func toggleScrollSync(_ sender: Any?) { store.scrollSync.toggle() }
+    @objc func toggleVisualRender(_ sender: Any?) { store.visualEnabled.toggle() }
     @objc func toggleAutosave(_ sender: Any?) { store.toggleAutosave() }
     @objc func largerText(_ sender: Any?) { store.changeFontSize(1) }
     @objc func smallerText(_ sender: Any?) { store.changeFontSize(-1) }
@@ -386,8 +389,17 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
         autosave.state = store.autosaveEnabled ? .on : .off
         let sync = NSButton(checkboxWithTitle: "편집기·미리보기 스크롤 동기화", target: self, action: #selector(settingSync(_:)))
         sync.state = store.scrollSync ? .on : .off
+        let visual = NSButton(checkboxWithTitle: "미리보기에서 머메이드·구문 색상·수식 렌더링",
+                             target: self, action: #selector(settingVisual(_:)))
+        visual.state = store.visualEnabled ? .on : .off
+        if !Vendor.available {
+            visual.state = .off
+            visual.title = "미리보기 시각화 렌더링 (앱에 번들 없음)"
+        }
+        visual.isEnabled = Vendor.available
         stack.addArrangedSubview(autosave)
         stack.addArrangedSubview(sync)
+        stack.addArrangedSubview(visual)
         alert.accessoryView = stack
         alert.addButton(withTitle: "완료")
         alert.beginSheetModal(for: window, completionHandler: nil)
@@ -401,6 +413,10 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
         store.scrollSync = sender.state == .on
     }
 
+    @objc private func settingVisual(_ sender: NSButton) {
+        store.visualEnabled = sender.state == .on
+    }
+
     @objc func showShortcuts(_ sender: Any?) {
         let alert = NSAlert()
         alert.messageText = "단축키"
@@ -411,7 +427,8 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
         목록    ⌥⌘L 글머리 · ⇧⌘L 번호 · ⇧⌘Q 인용구 · ⇧⌘D 구분선
         보기    ⌘R 미리보기 토글 · ⌘+ / ⌘- 글자 크기 · ⌃⌘S 사이드바
         편집    ⌘F 찾기 · ⇧⌘F 바꾸기 · Tab 들여쓰기 · Enter 목록 자동 이어짐
-        내보내기 ⇧⌘E HTML 저장 · ⇧⌘B 브라우저 미리보기
+        내보내기 ⇧⌘E HTML 저장 · ⌥⇧⌘E 그림·수식 포함 · ⇧⌘B 브라우저 미리보기
+        시각화  머메이드 · 코드 구문 색상 · LaTeX 수식 (보기 메뉴에서 켜고 끄기)
         """
         alert.addButton(withTitle: "확인")
         alert.beginSheetModal(for: Store.shared.window ?? NSWindow(), completionHandler: nil)
@@ -424,6 +441,7 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
         let needsDoc: Set<Selector> = [
             #selector(saveDocument(_:)), #selector(revertToDisk(_:)), #selector(renameDocument(_:)),
             #selector(deleteDocument(_:)), #selector(revealInFinder(_:)), #selector(exportHTML(_:)),
+            #selector(exportHTMLRich(_:)),
             #selector(openInBrowser(_:)), #selector(copyHTML(_:)), #selector(copyMarkdown(_:)),
             #selector(boldText(_:)), #selector(italicText(_:)), #selector(strikeText(_:)),
             #selector(inlineCodeText(_:)), #selector(codeBlockText(_:)), #selector(insertLink(_:)),
@@ -436,6 +454,12 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
             switch action {
             case #selector(toggleAutosave(_:)): menuItem.state = store.autosaveEnabled ? .on : .off
             case #selector(toggleScrollSync(_:)): menuItem.state = store.scrollSync ? .on : .off
+            case #selector(toggleVisualRender(_:)):
+                menuItem.state = store.visualEnabled ? .on : .off
+                guard Vendor.available else {
+                    menuItem.state = .off
+                    return false
+                }
             case #selector(togglePreview(_:)): menuItem.state = store.previewVisible ? .on : .off
             default: break
             }

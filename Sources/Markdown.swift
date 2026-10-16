@@ -39,8 +39,13 @@ enum Markdown {
                     if t.hasPrefix(fence) { i += 1; break }
                     body.append(lines[i]); i += 1
                 }
-                let cls = lang.isEmpty ? "" : " class=\"language-\(escape(lang))\""
-                out.append("<pre><code\(cls)>\(escape(body.joined(separator: "\n")))</code></pre>")
+                if lang.lowercased() == "mermaid" {
+                    // Mermaid reads the element's text, so the escaped source is exactly right.
+                    out.append("<div class=\"mermaid\">\(escape(body.joined(separator: "\n")))</div>")
+                } else {
+                    let cls = lang.isEmpty ? "" : " class=\"language-\(escape(lang))\""
+                    out.append("<pre><code\(cls)>\(escape(body.joined(separator: "\n")))</code></pre>")
+                }
                 continue
             }
 
@@ -160,9 +165,37 @@ enum Markdown {
         return out.joined(separator: "\n")
     }
 
+    /// How much of the offline renderer stack a page should carry.
+    enum Visual {
+        /// Plain prose — code fences stay text, no JS at all.
+        case off
+        /// Preview pane: load the vendored files through `marknote://vendor/…`.
+        case preview
+        /// Export: embed the vendored files (fonts as data URIs) in one HTML file.
+        case inlined
+    }
+
     /// A self-contained page used for preview and export.
-    static func page(title: String, body: String, dark: Bool, docBaseURL: URL?, bridge: Bool = false) -> String {
+    static func page(title: String, body: String, dark: Bool, docBaseURL: URL? = nil,
+                     bridge: Bool = false, visual: Visual = .off) -> String {
         _ = docBaseURL
+        var head = "<style>\(css(dark: dark))</style>"
+        var tail = ""
+
+        switch visual {
+        case .off:
+            break
+        case .preview:
+            head += "\n" + Vendor.previewStyleTags(dark: dark)
+            tail += Vendor.previewScriptTags(dark: dark)
+        case .inlined:
+            let styles = Vendor.exportStyles(dark: dark)
+            if !styles.isEmpty { head += "\n<style>\(styles)</style>" }
+            tail += Vendor.exportScripts(dark: dark)
+        }
+        // Last so these rules win over the vendored stylesheets above.
+        if visual != .off { head += "\n<style>\(visualOverrides(dark: dark))</style>" }
+
         return """
         <!DOCTYPE html>
         <html lang="ko">
@@ -170,21 +203,48 @@ enum Markdown {
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>\(escape(title))</title>
-        <style>\(css(dark: dark))</style>
+        \(head)
         </head>
         <body>
         <article class="markdown-body">
         \(body)
         </article>
         \(bridge ? bridgeScript : "")
+        \(tail)
         </body>
         </html>
         """
     }
 
+    /// Rules that keep the vendored styles from fighting the note layout.
+    private static func visualOverrides(dark: Bool) -> String {
+        let palette = dark ? (code: "#2a2c33", border: "#33353d", mute: "#9a9ca6")
+                           : (code: "#f4f5f8", border: "#e6e8ee", mute: "#6b6f7b")
+        return """
+        pre code.hljs { background: transparent; padding: 0; display: block; overflow-x: auto; }
+        .hljs { background: transparent; color: inherit; padding: 0; }
+        .mermaid {
+          margin: 0 0 1.3em; padding: 16px 14px; text-align: center;
+          background: \(palette.code); border: 1px solid \(palette.border); border-radius: 12px;
+          overflow-x: auto;
+        }
+        .mermaid svg { max-width: 100%; height: auto; }
+        .mermaid.render-failed {
+          text-align: left; white-space: pre-wrap; color: \(palette.mute);
+          font: .86em ui-monospace, "SF Mono", Menlo, monospace;
+        }
+        .katex { font-size: 1.06em; }
+        .katex-display { margin: 0 0 1.2em; overflow-x: auto; overflow-y: hidden; padding: .3em 0; }
+        """
+    }
+
     static let bridgeScript = """
     <script>
-    window.__set = function (h) { var a = document.querySelector('article.markdown-body'); if (a) a.innerHTML = h; };
+    window.__set = function (h) {
+      var a = document.querySelector('article.markdown-body');
+      if (a) a.innerHTML = h;
+      if (window.__renderVisual) window.__renderVisual();
+    };
     function __max() { return Math.max(1, document.documentElement.scrollHeight - window.innerHeight); }
     window.__fraction = function () { return window.scrollY / __max(); };
     window.__setQuiet = function (h, f) {
@@ -206,7 +266,34 @@ enum Markdown {
         page(title: title, body: toHTML(source), dark: dark, docBaseURL: nil)
     }
 
+    /// Rewrites relative `src`/`href` values to absolute `file:` URLs so a page
+    /// written outside the note folder (the browser preview) still finds images.
+    static func absolutize(_ html: String, docURL: URL) -> String {
+        let dir = docURL.deletingLastPathComponent()
+        guard let re = try? NSRegularExpression(pattern: "(?i)\\b(src|href)=\"([^\"]+)\"") else { return html }
+        let ns = html as NSString
+        var patches: [(NSRange, String)] = []
+        re.enumerateMatches(in: html, range: NSRange(location: 0, length: ns.length)) { match, _, _ in
+            guard let match, match.numberOfRanges == 3 else { return }
+            let value = ns.substring(with: match.range(at: 2))
+            if value.contains(":") || value.hasPrefix("/") || value.hasPrefix("#") { return }
+            patches.append((match.range(at: 2), dir.appendingPathComponent(value).standardizedFileURL.absoluteString))
+        }
+        var result = html
+        for (range, replacement) in patches.reversed() {
+            result = (result as NSString).replacingCharacters(in: range, with: replacement)
+        }
+        return result
+    }
+
     // MARK: - Blocks
+
+    /// Extensions the app opens as notes (used for preview links and folder scan).
+    static let documentExtensions = ["md", "markdown", "mdown"]
+
+    static func isReadableTextFile(_ url: URL) -> Bool {
+        documentExtensions.contains(url.pathExtension.lowercased())
+    }
 
     private static func headingLevel(_ t: String) -> (level: Int, text: String)? {
         guard t.hasPrefix("#") else { return nil }
@@ -397,6 +484,13 @@ enum Markdown {
         }
         hr { border: 0; border-top: 1px solid \(palette.border); margin: 2em 0; }
         img { max-width: 100%; border-radius: 10px; }
+        .mermaid { margin: 0 0 1.2em; }
+        .markdown-body .mermaid:not(:has(svg)) {
+          font: .86em/1.65 ui-monospace, "SF Mono", Menlo, monospace;
+          white-space: pre-wrap; text-align: left; color: \(palette.mute);
+          background: \(palette.code); border: 1px solid \(palette.border);
+          border-radius: 10px; padding: 13px 15px; overflow-x: auto;
+        }
         table { border-collapse: collapse; width: 100%; margin: 0 0 1.3em; font-size: .95em; }
         th, td { border: 1px solid \(palette.border); padding: 8px 12px; }
         th { background: \(palette.code); font-weight: 650; }

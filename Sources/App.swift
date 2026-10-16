@@ -126,6 +126,7 @@ enum MainMenu {
         add(menu, "휴지통으로 이동", #selector(MainController.deleteDocument(_:)))
         menu.addItem(.separator())
         add(menu, "HTML로 내보내기…", #selector(MainController.exportHTML(_:)), "e", [.command, .shift])
+        add(menu, "시각화 포함 HTML 내보내기…", #selector(MainController.exportHTMLRich(_:)), "e", [.command, .shift, .option])
         add(menu, "브라우저로 미리보기", #selector(MainController.openInBrowser(_:)), "b", [.command, .shift])
         add(menu, "HTML로 복사", #selector(MainController.copyHTML(_:)), "c", [.command, .shift, .option])
         return item
@@ -182,6 +183,7 @@ enum MainMenu {
         add(menu, "미리보기 보이기/숨기기", #selector(MainController.togglePreview(_:)), "r")
         add(menu, "사이드바 보이기/숨기기", Selector(("toggleSidebar:")), "s", [.command, .control])
         add(menu, "스크롤 동기화", #selector(MainController.toggleScrollSync(_:)))
+        add(menu, "그림·수식 렌더링", #selector(MainController.toggleVisualRender(_:)))
         menu.addItem(.separator())
         add(menu, "글자 크기 키우기", #selector(MainController.largerText(_:)), "+")
         add(menu, "글자 크기 줄이기", #selector(MainController.smallerText(_:)), "-")

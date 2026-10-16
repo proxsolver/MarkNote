@@ -4,6 +4,7 @@ import WebKit
 final class PreviewController: NSViewController, WKNavigationDelegate, WKScriptMessageHandler {
     private let store: Store
     private var web: WKWebView!
+    private let schemeHandler = VendorSchemeHandler()
     private var loaded = false
     private var lastDark = false
     private var pending: DispatchWorkItem?
@@ -24,6 +25,8 @@ final class PreviewController: NSViewController, WKNavigationDelegate, WKScriptM
         let config = WKWebViewConfiguration()
         config.userContentController.add(self, name: "scroll")
         config.suppressesIncrementalRendering = false
+        // marknote:// serves the bundled renderer files and images beside the document.
+        config.setURLSchemeHandler(schemeHandler, forURLScheme: Vendor.scheme)
 
         web = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 640), configuration: config)
         web.navigationDelegate = self
@@ -39,6 +42,14 @@ final class PreviewController: NSViewController, WKNavigationDelegate, WKScriptM
     }
 
     // MARK: - Rendering
+
+    /// Diagrams / code colours / math are on only when the user enabled them
+    /// and the bundled files really are inside the app.
+    private var visualMode: Markdown.Visual {
+        (store.visualEnabled && Vendor.available) ? .preview : .off
+    }
+
+    private var usesSchemeBase: Bool { visualMode == .preview && store.current != nil }
 
     private func schedule(full: Bool) {
         pending?.cancel()
@@ -56,12 +67,19 @@ final class PreviewController: NSViewController, WKNavigationDelegate, WKScriptM
 
         if mustReload {
             loaded = true
+            schemeHandler.docDirectory = store.current?.url.deletingLastPathComponent()
             let html = Markdown.page(title: store.current?.title ?? "미리보기",
                                      body: Markdown.toHTML(store.text),
                                      dark: dark,
                                      docBaseURL: store.current?.url,
-                                     bridge: true)
-            web.loadHTMLString(html, baseURL: store.current?.url)
+                                     bridge: true,
+                                     visual: visualMode)
+            if usesSchemeBase, let base = Vendor.pageBaseURL(for: store.current?.url.deletingLastPathComponent()) {
+                // A directory base keeps `![](photo.png)` resolving through marknote://assets/doc/…
+                web.loadHTMLString(html, baseURL: base)
+            } else {
+                web.loadHTMLString(html, baseURL: store.current?.url)
+            }
             return
         }
 
@@ -92,7 +110,18 @@ final class PreviewController: NSViewController, WKNavigationDelegate, WKScriptM
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
-            NSWorkspace.shared.open(url)
+            if url.scheme == Vendor.scheme {
+                // marknote:// links are files next to the document.
+                if let target = schemeHandler.file(for: url) {
+                    if Markdown.isReadableTextFile(target) {
+                        store.openExternal(target.path)
+                    } else {
+                        NSWorkspace.shared.open(target)
+                    }
+                }
+            } else {
+                NSWorkspace.shared.open(url)
+            }
             decisionHandler(.cancel)
             return
         }

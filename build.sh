@@ -21,6 +21,12 @@ if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
   cp "$ROOT/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 fi
 
+# 오프라인 렌더러(mermaid, highlight.js, KaTeX)를 번들에 함께 담습니다.
+if [[ -d "$ROOT/Resources/vendor" ]]; then
+  cp -R "$ROOT/Resources/vendor" "$APP_DIR/Contents/Resources/vendor"
+  echo "▸ vendor assets: $(du -sh "$APP_DIR/Contents/Resources/vendor" | cut -f1)"
+fi
+
 echo "▸ compile (swiftc)"
 swiftc \
   -parse-as-library \

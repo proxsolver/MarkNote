@@ -1,5 +1,18 @@
 import Foundation
 
+extension String {
+    /// `""` and missing path components behave the same way downstream.
+    var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
+/// "1.2 MB" for the export toast.
+func ByteCount(_ bytes: Int) -> String {
+    let formatter = ByteCountFormatter()
+    formatter.countStyle = .file
+    formatter.allowedUnits = [.useKB, .useMB]
+    return formatter.string(fromByteCount: Int64(bytes))
+}
+
 extension Date {
     /// "오후 3:12" today, "수" this week, "10/12" earlier — for the sidebar.
     var abbreviated: String {

@@ -336,6 +336,27 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
     @objc func useDefaultFolder(_ sender: Any?) { store.useDefaultFolder() }
     @objc func saveDocument(_ sender: Any?) { store.saveNow() }
     @objc func revertToDisk(_ sender: Any?) { store.reloadFromDisk() }
+    @objc func showHistory(_ sender: Any?) {
+        guard let window, store.current != nil else { return }
+        HistoryPanel.present(store: store, window: window)
+    }
+    @objc func toggleHistoryKeeping(_ sender: Any?) { store.toggleHistoryKeeping() }
+    @objc func revealHistoryFolder(_ sender: Any?) { store.revealHistoryFolder() }
+    @objc func clearCurrentHistory(_ sender: Any?) {
+        guard let doc = store.current, let window else { return }
+        let count = store.historySnapshots.count
+        let alert = NSAlert()
+        alert.messageText = "'\(doc.fileName)'의 히스토리를 지울까요?"
+        alert.informativeText = count == 0
+            ? "보관된 이전 버전이 없습니다."
+            : "이전 버전 \(count)개가 사라집니다. 문서 자체는 그대로 있습니다."
+        alert.addButton(withTitle: count == 0 ? "확인" : "지우기")
+        alert.addButton(withTitle: "취소")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn, count > 0 else { return }
+            self.store.clearHistory(of: doc)
+        }
+    }
     @objc func renameDocument(_ sender: Any?) { store.renameCurrent() }
     @objc func deleteDocument(_ sender: Any?) { store.deleteCurrent() }
     @objc func revealInFinder(_ sender: Any?) { store.revealInFinder() }
@@ -403,9 +424,13 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
             visual.title = "미리보기 시각화 렌더링 (앱에 번들 없음)"
         }
         visual.isEnabled = Vendor.available
+        let history = NSButton(checkboxWithTitle: "저장할 때마다 이전 버전 보관 (노트 옆 \(NoteHistory.directoryName), 최근 \(NoteHistory.limit)개)",
+                               target: self, action: #selector(settingHistory(_:)))
+        history.state = store.historyEnabled ? .on : .off
         stack.addArrangedSubview(autosave)
         stack.addArrangedSubview(sync)
         stack.addArrangedSubview(visual)
+        stack.addArrangedSubview(history)
         alert.accessoryView = stack
         alert.addButton(withTitle: "완료")
         alert.beginSheetModal(for: window, completionHandler: nil)
@@ -423,6 +448,11 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
         store.visualEnabled = sender.state == .on
     }
 
+    @objc private func settingHistory(_ sender: NSButton) {
+        guard store.historyEnabled != (sender.state == .on) else { return }
+        store.historyEnabled = sender.state == .on
+    }
+
     @objc func showShortcuts(_ sender: Any?) {
         let alert = NSAlert()
         alert.messageText = "단축키"
@@ -433,7 +463,8 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
         목록    ⌥⌘L 글머리 · ⇧⌘L 번호 · ⇧⌘Q 인용구 · ⇧⌘D 구분선
         보기    ⌘R 미리보기 토글 · ⌘+ / ⌘- 글자 크기 · ⌃⌘S 사이드바
         정렬    ⌥⌘1 이름 · ⌥⌘2 최근 수정 · ⌥⌘3 생성일 · ⇧⌥⌘S 방향 · ⌥⌘B 참조 목록
-        편집    ⌘F 찾기 · ⇧⌘F 바꾸기 · Tab 들여쓰기 · Enter 목록 자동 이어짐
+        히스토리 ⌃⌘H 저장 히스토리 · ⇧⌥⌘H 히스토리 폴더 · 되돌리기는 확인 후 실행
+        편집    ⌘F 찾기 · ⌥⌘F 바꾸기 · Tab 들여쓰기 · Enter 목록 자동 이어짐
         내보내기 ⇧⌘E HTML 저장 · ⌥⇧⌘E 그림·수식 포함 · ⇧⌘B 브라우저 미리보기
         시각화  머메이드 · 코드 구문 색상 · LaTeX 수식 (보기 메뉴에서 켜고 끄기)
         """
@@ -456,6 +487,7 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
             #selector(heading1(_:)), #selector(heading2(_:)), #selector(heading3(_:)),
             #selector(clearHeading(_:)), #selector(bulletList(_:)), #selector(numberList(_:)),
             #selector(blockQuote(_:)), #selector(horizontalRule(_:)),
+            #selector(showHistory(_:)), #selector(revealHistoryFolder(_:)), #selector(clearCurrentHistory(_:)),
         ]
         if let action, needsDoc.contains(action), store.current == nil { return false }
         if let action {
@@ -476,6 +508,11 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
                 menuItem.state = .off
                 menuItem.title = store.sortAscending ? "내림차순으로" : "오름차순으로"
             case #selector(toggleBacklinks(_:)): menuItem.state = store.backlinksExpanded ? .on : .off
+            case #selector(toggleHistoryKeeping(_:)): menuItem.state = store.historyEnabled ? .on : .off
+            case #selector(clearCurrentHistory(_:)):
+                // 비울 것이 없으면 메뉴 회색으로 — "지웠습니다" 토스트가 거짓말이 되지 않게.
+                menuItem.state = .off
+                return !store.historySnapshots.isEmpty
             default: break
             }
         }

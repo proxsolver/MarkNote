@@ -45,6 +45,7 @@ private enum Keys {
     static let sort = "docsSort"
     static let sortAsc = "docsSortAscending"
     static let refsExpanded = "backlinksExpanded"
+    static let history = "historyEnabled"
 }
 
 /// All app state and file work lives here. Views subscribe with `on(_:)`.
@@ -116,6 +117,13 @@ final class Store: NSObject {
         didSet { defaults.set(backlinksExpanded, forKey: Keys.refsExpanded); emit(.links) }
     }
 
+    /// 저장할 때마다 파일이 덮어쓰이기 직전의 바이트를 `.marknote-history`에 남깁니다.
+    /// Drive·iCloud로 동기화되는 폴더는 이 숨은 폴더까지 함께 올라가므로, 메뉴에서
+    /// 언제든 끌 수 있습니다(껐다고 기존 아카이브가 지워지지는 않습니다).
+    var historyEnabled: Bool {
+        didSet { defaults.set(historyEnabled, forKey: Keys.history); emit(.ui) }
+    }
+
     var toast: String? {
         didSet {
             guard let toast, toast != oldValue else { return }
@@ -154,6 +162,7 @@ final class Store: NSObject {
         sort = DocSort(rawValue: defaults.string(forKey: Keys.sort) ?? "") ?? .modified
         sortAscending = defaults.object(forKey: Keys.sortAsc) as? Bool ?? false
         backlinksExpanded = defaults.object(forKey: Keys.refsExpanded) as? Bool ?? true
+        historyEnabled = defaults.object(forKey: Keys.history) as? Bool ?? true
         super.init()
         Theme.size = fontSize
     }
@@ -371,6 +380,63 @@ final class Store: NSObject {
         return true
     }
 
+    // MARK: - History
+
+    /// 노트 옆 숨은 폴더에 이전 버전을 쌓아 두는 보관함. 경로를 언제나 노트에서 유도하므로
+    /// 보관함 자체는 상태를 갖지 않습니다 — 폴더를 바꾸거나 다른 곳의 노트를 열어도 그대로 맞습니다.
+    let noteHistory = NoteHistory()
+
+    func historySnapshots(for doc: Doc) -> [Snapshot] { noteHistory.snapshots(for: doc) }
+    var historySnapshots: [Snapshot] { current.map(historySnapshots(for:)) ?? [] }
+
+    /// 예전 버전으로 되돌리기. 되돌리기 전 내용은 히스토리에 남으므로 이 동작도 되돌릴 수
+    /// 있습니다. 보관 설정이 꺼져 있어도 이 한 장만은 반드시 남깁니다 — 사용자가 명시적으로
+    /// 요청한 복원이 지금 쓴 내용을 삼켜서는 안 됩니다.
+    @discardableResult
+    func restoreHistory(_ snap: Snapshot) -> Bool {
+        guard let doc = current else { return false }
+        flush()
+        let previous = DocumentBytes.read(doc.url)
+        guard noteHistory.restore(snap, to: doc) else {
+            toast = "복원 실패: 히스토리 파일을 읽을 수 없습니다"
+            return false
+        }
+        if let previous { noteHistory.capture(previous, for: doc) }
+        let modified = (try? doc.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+        dates[doc.url.path] = (modified: modified, created: dates[doc.url.path]?.created ?? modified)
+        reloadFromDisk()
+        refreshReferences()
+        toast = "히스토리에서 복원했습니다 · \(snap.savedAt.historyStamp)"
+        return true
+    }
+
+    func toggleHistoryKeeping() {
+        historyEnabled.toggle()
+        toast = historyEnabled
+            ? "이전 버전 보관 켜짐 · 노트 옆 \(NoteHistory.directoryName)"
+            : "이전 버전 보관 꺼짐 · 이미 남은 버전은 그대로 있습니다"
+    }
+
+    /// 아카이브 폴더를 Finder에서 보여줍니다. 아직 한 장도 없으면 노트가 있는 폴더로 갑니다.
+    func revealHistoryFolder() {
+        guard let doc = current else { return }
+        let snaps = noteHistory.snapshots(for: doc)
+        if let dir = noteHistory.existingDirectory(for: doc) {
+            NSWorkspace.shared.activateFileViewerSelecting([dir])
+            toast = "히스토리 폴더 · \(snaps.count)개"
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting([doc.url])
+            toast = "이 문서의 히스토리는 아직 없습니다"
+        }
+    }
+
+    @discardableResult
+    func clearHistory(of doc: Doc) -> Int {
+        let removed = noteHistory.clear(doc)
+        toast = removed == 0 ? "지울 히스토리가 없습니다" : "히스토리 \(removed)개를 지웠습니다"
+        return removed
+    }
+
     // MARK: - Selection
 
     func select(_ doc: Doc) {
@@ -465,6 +531,9 @@ final class Store: NSObject {
             let target = doc.url.deletingLastPathComponent().appendingPathComponent(name)
             do {
                 try FileManager.default.moveItem(at: doc.url, to: target)
+                // Archived versions travel with the note, otherwise renaming `회의.md`
+                // to `주간 회의.md` would strand every earlier version of it.
+                self.noteHistory.move(from: doc, to: target)
                 self.current = Doc(url: target)
                 self.defaults.set(target.path, forKey: Keys.lastDoc)
                 self.reloadList()
@@ -480,7 +549,7 @@ final class Store: NSObject {
         guard let doc = current, let window else { return }
         let alert = NSAlert()
         alert.messageText = "'\(doc.fileName)'을(를) 휴지통으로 옮길까요?"
-        alert.informativeText = "Finder에서 복원할 수 있습니다."
+        alert.informativeText = "Finder에서 복원할 수 있습니다. 보관된 이전 버전은 \".marknote-history\"에 그대로 남습니다."
         alert.addButton(withTitle: "휴지통으로 이동")
         alert.addButton(withTitle: "취소")
         alert.beginSheetModal(for: window) { [weak self] response in
@@ -549,12 +618,22 @@ final class Store: NSObject {
     private func write() {
         guard let doc = current else { return }
         let snapshot = text
+        let snapshotData = Data(text.utf8)
+        // Grab what is on disk *before* overwriting it: that byte-for-byte copy is the
+        // previous version. `DocumentBytes` declines huge files so this main-thread read
+        // stays a memcpy of a note, not of an accidental 400 MB blob.
+        let previous = historyEnabled ? DocumentBytes.read(doc.url) : nil
         do {
             try snapshot.write(to: doc.url, atomically: true, encoding: .utf8)
             diskContent = snapshot
             isDirty = false
             savedAt = Date()
             diskModified = (try? doc.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+            // Only after a successful save — a failed one must not invent a version that
+            // never existed. Bytes that match what we just wrote (⌘S on a clean document)
+            // are skipped, and `capture` drops a byte-identical newest copy as well, so
+            // pressing save five times does not fill the archive with one version five times.
+            if let previous, previous != snapshotData { noteHistory.capture(previous, for: doc) }
             // The just-saved note is the one file whose links may have changed, so
             // hand the scanner its new timestamp — otherwise the mtime cache would
             // keep serving the pre-save references.

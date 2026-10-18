@@ -112,6 +112,20 @@ enum MainMenu {
         menu.addItem(.separator())
         add(menu, "저장", #selector(MainController.saveDocument(_:)), "s")
         add(menu, "디스크 내용으로 되돌리기", #selector(MainController.revertToDisk(_:)), "v", [.command, .shift])
+
+        let history = NSMenuItem(title: "히스토리", action: nil, keyEquivalent: "")
+        let historyMenu = NSMenu(title: "히스토리")
+        history.submenu = historyMenu
+        // ⌥⌘H is macOS's system-wide "다른 앱 가리기" (Hide Others) chord — the app menu
+        // owns it, so a history item bound to it never fires. ⌃⌘H is free and matches
+        // the ⌃⌘S sidebar toggle family already used here.
+        add(historyMenu, "저장 히스토리…", #selector(MainController.showHistory(_:)), "h", [.command, .control])
+        add(historyMenu, "히스토리 폴더 열기", #selector(MainController.revealHistoryFolder(_:)), "h", [.command, .shift, .option])
+        historyMenu.addItem(.separator())
+        add(historyMenu, "이전 버전 자동 보관", #selector(MainController.toggleHistoryKeeping(_:)))
+        add(historyMenu, "이 문서 히스토리 비우기…", #selector(MainController.clearCurrentHistory(_:)))
+        menu.addItem(history)
+
         menu.addItem(.separator())
 
         let recent = NSMenuItem(title: "최근 문서", action: nil, keyEquivalent: "")

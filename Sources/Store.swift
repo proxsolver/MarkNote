@@ -259,14 +259,15 @@ final class Store: NSObject {
 
     private func load(_ doc: Doc) {
         loading = true
-        let content = (try? String(contentsOf: doc.url, encoding: .utf8)) ?? ""
-        diskContent = content
-        text = content
+        let read = DocumentText.read(doc.url)
+        diskContent = read.raw
+        text = read.text
         diskModified = (try? doc.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
         savedAt = diskModified
         isDirty = false
         loading = false
         emit(.text)
+        if let notice = read.format.notice { toast = notice }
     }
 
     // MARK: - Create / rename / delete
@@ -423,9 +424,9 @@ final class Store: NSObject {
         guard let doc = current, !isDirty else { return }
         let modified: Date? = (try? doc.url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         guard let m = modified, let known = diskModified, m > known else { return }
-        let content = (try? String(contentsOf: doc.url, encoding: .utf8)) ?? ""
-        guard content != text else { return }
-        diskContent = content
+        let read = DocumentText.read(doc.url)
+        guard read.text != text else { return }
+        diskContent = read.raw
         diskModified = m
         savedAt = m
         if editor?.window?.isKeyWindow == true {
@@ -433,7 +434,7 @@ final class Store: NSObject {
             emit(.ui)
         } else {
             loading = true
-            text = content
+            text = read.text
             loading = false
             emit(.text)
             emit(.document)
@@ -442,18 +443,18 @@ final class Store: NSObject {
 
     func reloadFromDisk() {
         guard let doc = current else { return }
-        let content = (try? String(contentsOf: doc.url, encoding: .utf8)) ?? ""
-        diskContent = content
+        let read = DocumentText.read(doc.url)
+        diskContent = read.raw
         diskModified = (try? doc.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
         loading = true
-        text = content
+        text = read.text
         loading = false
         isDirty = false
         externallyChanged = false
         savedAt = Date()
         emit(.text)
         emit(.ui)
-        toast = "디스크 내용을 다시 읽었습니다"
+        toast = read.format.notice ?? "디스크 내용을 다시 읽었습니다"
         editor?.setNeedsDisplay(editor?.visibleRect ?? .zero)
     }
 

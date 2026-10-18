@@ -1,8 +1,64 @@
-import Foundation
+import AppKit
 
 extension String {
     /// `""` and missing path components behave the same way downstream.
     var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
+/// A note saved as `.md` does not always hold Markdown. TextEdit — and a few
+/// chat and agent tools — write Rich Text and only rename the extension, which
+/// reads as `{\rtf1\ansi\ansicpg949…}` with every Korean syllable escaped to
+/// `\uNNNN`. Decode those so the note is legible, but hand the original bytes
+/// back too: the editor shows the text while the file keeps whatever was on
+/// disk, so opening a note never rewrites it — only saving does.
+enum DocumentText {
+    enum Format: Equatable {
+        case markdown
+        case rtf
+
+        /// Shown once when a note is opened, so the conversion is not a surprise.
+        var notice: String? {
+            switch self {
+            case .markdown: return nil
+            case .rtf: return "이 파일은 RTF 원문입니다 — 텍스트로 변환해 보여줍니다. 저장하면 이 내용으로 바뀝니다"
+            }
+        }
+    }
+
+    struct Read {
+        /// What the editor should show.
+        let text: String
+        /// What is actually on disk, verbatim.
+        let raw: String
+        let format: Format
+    }
+
+    static func read(_ url: URL) -> Read {
+        let data = (try? Data(contentsOf: url)) ?? Data()
+        // Latin-1 cannot fail, so the RTF header stays recognisable even when the
+        // file is not valid UTF-8 (cp949 RTF from an older TextEdit, say).
+        let raw = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .isoLatin1) ?? ""
+        guard looksLikeRTF(raw), let decoded = rtfToText(data),
+              !decoded.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return Read(text: raw, raw: raw, format: .markdown)
+        }
+        return Read(text: decoded, raw: raw, format: .rtf)
+    }
+
+    static func looksLikeRTF(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix(#"{\rtf"#)
+    }
+
+    /// AppKit's own RTF reader: handles `\par`, groups, escapes and `\uNNNN`
+    /// without a network or an extra dependency.
+    private static func rtfToText(_ data: Data) -> String? {
+        guard let attr = try? NSAttributedString(
+            data: data,
+            options: [.documentType: NSAttributedString.DocumentType.rtf],
+            documentAttributes: nil) else { return nil }
+        return attr.string
+    }
 }
 
 /// "1.2 MB" for the export toast.

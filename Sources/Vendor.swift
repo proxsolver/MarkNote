@@ -198,6 +198,12 @@ extension Vendor {
             } catch (e) {}
           }
           var queued = null;
+          // Only one mermaid.render may be in flight, ever: the library measures text
+          // through shared state, so a second concurrent call reads half-finished numbers
+          // and its diagram comes out collapsed onto the first one. A module-level chain
+          // covers the case paint() itself re-enters while an earlier batch is still
+          // drawing (every keystroke schedules a new one).
+          var mnChain = Promise.resolve();
           function paint() {
             queued = null;
             var root = document.querySelector('article.markdown-body') || document.body;
@@ -225,16 +231,36 @@ extension Vendor {
               } catch (e) {}
             }
             if (window.mermaid) {
-              // One call per diagram: mermaid rejects the whole batch when a single
-              // block fails to parse, and it skips elements already marked
-              // data-processed — so re-entrancy uses our own attribute.
+              // Queue this paint's diagrams on the shared chain instead of calling
+              // mermaid.run on them all at once: two renders in flight corrupt each
+              // other's measurements (see mnChain). Still one call per diagram, so a
+              // parse failure stays contained to its own block — a batched call aborts
+              // the whole batch and skips elements already marked data-processed.
               var pending = root.querySelectorAll('.mermaid');
+              var todo = [];
               for (var j = 0; j < pending.length; j++) {
-                (function (node) {
-                  if (node.querySelector('svg') || node.getAttribute('data-mn-run') === '1') return;
-                  node.setAttribute('data-mn-run', '1');
-                  var source = node.textContent;
+                var node = pending[j];
+                if (node.querySelector('svg') || node.getAttribute('data-mn-run') === '1') continue;
+                node.setAttribute('data-mn-run', '1');
+                todo.push({ el: node, source: node.textContent });
+              }
+              var renderOne = function (item) {
+                return new Promise(function (resolve) {
+                  var node = item.el;
+                  var settled = false;
+                  var timer = 0;
+                  var finish = function () {
+                    if (settled) return;
+                    settled = true;
+                    if (timer) clearTimeout(timer);
+                    resolve();
+                  };
+                  // The preview replaces the article on every keystroke, so a queued
+                  // node can already be detached; rendering into it would only waste
+                  // the shared measurement element the next diagram needs.
+                  if (!document.contains(node)) { finish(); return; }
                   var park = function (err) {
+                    finish();
                     node.setAttribute('data-mn-run', '0');
                     node.classList.add('render-failed');
                     if (err) {
@@ -244,20 +270,27 @@ extension Vendor {
                     }
                     // A parse failure may leave mermaid's own error picture behind;
                     // when nothing was drawn, put the readable source back.
-                    if (!node.querySelector('svg')) node.textContent = source;
+                    if (!node.querySelector('svg')) node.textContent = item.source;
                   };
-                  var settle = function () {
-                    if (node.querySelector('svg')) node.setAttribute('data-mn-run', '1');
+                  // Serialising only helps while the queue keeps moving, so each render
+                  // gets a deadline — a wedged one would block every later diagram.
+                  // Healthy diagrams settle in a few hundred milliseconds.
+                  timer = setTimeout(function () { park(new Error('render timeout')); }, 8000);
+                  var done = function () {
+                    if (node.querySelector('svg')) { node.setAttribute('data-mn-run', '1'); finish(); }
                     else park(null);
                   };
                   try {
                     var result = window.mermaid.run({ nodes: [node] });
-                    if (result && typeof result.then === 'function') result.then(settle, park);
-                    else settle();
+                    if (result && typeof result.then === 'function') result.then(done, park);
+                    else done();
                   } catch (e) {
                     park(e);
                   }
-                })(pending[j]);
+                });
+              };
+              for (var k = 0; k < todo.length; k++) {
+                (function (item) { mnChain = mnChain.then(function () { return renderOne(item); }); })(todo[k]);
               }
             }
           }

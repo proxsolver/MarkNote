@@ -293,6 +293,57 @@ enum Markdown {
         documentExtensions.contains(url.pathExtension.lowercased())
     }
 
+    // MARK: - Wiki links
+
+    /// Small note names the folder currently holds, refreshed with every scan.
+    /// Empty means "unknown", so nothing is painted as missing.
+    static var noteIndex: Set<String> = []
+
+    struct WikiLink {
+        let href: String
+        /// What the link reads when the author gave no alias.
+        let text: String
+        /// Normalised (`noteKey`) target note name, without extension — the backlink key.
+        let name: String
+        let resolved: Bool
+    }
+
+    /// Splits `[[노트]]`, `[[노트|라벨]]`, `[[노트#구절]]`, `[[#구절]]` into an href plus
+    /// the pieces the backlink index needs. A fragment becomes a heading anchor so
+    /// `[[가이드#원칙 6]]` lands on that heading in the preview.
+    static func wikiLink(target: String, index: Set<String> = noteIndex) -> WikiLink {
+        let trimmed = target.trimmingCharacters(in: .whitespaces)
+        let hash = trimmed.firstIndex(of: "#")
+        let filePart = hash.map { String(trimmed[..<$0]) } ?? trimmed
+        let fragment = (hash.map { String(trimmed[trimmed.index(after: $0)...]) } ?? "")
+            .trimmingCharacters(in: .whitespaces)
+        let name = filePart.trimmingCharacters(in: .whitespaces)
+        let suffix = fragment.isEmpty ? "" : "#\(anchor(fragment))"
+
+        guard !name.isEmpty else {
+            return WikiLink(href: suffix, text: fragment, name: "", resolved: true)
+        }
+        let extended = documentExtensions.contains((name as NSString).pathExtension.lowercased())
+        let path = extended ? name : name + ".md"
+        let href = path.components(separatedBy: "/")
+            .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? $0 }
+            .joined(separator: "/") + suffix
+        let key = ((name as NSString).deletingPathExtension as NSString).lastPathComponent.noteKey
+        return WikiLink(href: href, text: name, name: key, resolved: index.isEmpty || index.contains(key))
+    }
+
+    /// Undo the escaping `escape(_:)` applied before inline rules run, so a note
+    /// name containing `&` or a quote still matches the file on disk.
+    private static func decodeEntities(_ s: String) -> String {
+        var r = s
+        // &amp; last, otherwise "&amp;lt;" would collapse twice.
+        for (from, to) in [("&quot;", "\""), ("&#39;", "'"), ("&apos;", "'"),
+                           ("&lt;", "<"), ("&gt;", ">"), ("&nbsp;", " "), ("&amp;", "&")] {
+            r = r.replacingOccurrences(of: from, with: to)
+        }
+        return r
+    }
+
     private static func headingLevel(_ t: String) -> (level: Int, text: String)? {
         guard t.hasPrefix("#") else { return nil }
         var level = 0
@@ -414,6 +465,21 @@ enum Markdown {
             return "\u{1F}C\(codes.count - 1)\u{1F}"
         }
 
+        // Wiki links, resolved before the [text](url) rule so `[[…]]` never gets
+        // mistaken for a link with a bracket label. The href stays an ordinary
+        // relative ".md" path: in the preview it resolves through the
+        // marknote://assets/doc/ root, and in an exported file it works as a
+        // plain sibling link in a browser.
+        s = substitute(s, pattern: #"\[\[([^\[\]\|\n]+)(?:\|([^\[\]\n]*))?\]\]"#) { m in
+            let target = decodeEntities(m[1] ?? "")
+            let alias = (m[2] ?? "").isEmpty ? nil : decodeEntities(m[2] ?? "")
+            let link = wikiLink(target: target, index: noteIndex)
+            let label = escape(alias ?? link.text)
+            let state = link.resolved ? "wikilink" : "wikilink unresolved"
+            let hint = link.resolved ? "" : " title=\"노트가 없습니다 — 저장하면 이 이름으로 생깁니다\""
+            return "<a class=\"\(state)\" href=\"\(link.href)\" data-note=\"\(escape(target))\"\(hint)>\(label)</a>"
+        }
+
         s = substitute(s, pattern: #"!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\)"#) { m in
             "<img src=\"\(m[2] ?? "")\" alt=\"\(m[1] ?? "")\">"
         }
@@ -510,6 +576,10 @@ enum Markdown {
         p { margin: 0 0 1.05em; }
         a { color: \(palette.accent); text-decoration: none; }
         a:hover { text-decoration: underline; }
+        a.wikilink { text-decoration: none; }
+        /* [[이름]]이 목록에 없는 노트를 가리킬 때: 회색 점선, 클릭하면 아무 일도 없습니다. */
+        a.wikilink.unresolved { color: \(palette.mute); border-bottom: 1px dashed \(palette.mute); }
+        a.wikilink.unresolved:hover { color: \(palette.accent); border-bottom-color: \(palette.accent); }
         strong { font-weight: 700; color: \(palette.strong); }
         em { font-style: italic; }
         del { color: \(palette.mute); }

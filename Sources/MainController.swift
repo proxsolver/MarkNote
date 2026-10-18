@@ -352,6 +352,7 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
     @objc func inlineCodeText(_ sender: Any?) { store.run(.inlineCode) }
     @objc func codeBlockText(_ sender: Any?) { store.run(.codeBlock) }
     @objc func insertLink(_ sender: Any?) { store.run(.link) }
+    @objc func insertWikiLink(_ sender: Any?) { store.run(.wikiLink) }
     @objc func heading1(_ sender: Any?) { store.run(.heading(1)) }
     @objc func heading2(_ sender: Any?) { store.run(.heading(2)) }
     @objc func heading3(_ sender: Any?) { store.run(.heading(3)) }
@@ -364,6 +365,11 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
     @objc func togglePreview(_ sender: Any?) { store.togglePreview() }
     @objc func toggleScrollSync(_ sender: Any?) { store.scrollSync.toggle() }
     @objc func toggleVisualRender(_ sender: Any?) { store.visualEnabled.toggle() }
+    @objc func sortByTitle(_ sender: Any?) { store.sort = .title }
+    @objc func sortByModified(_ sender: Any?) { store.sort = .modified }
+    @objc func sortByCreated(_ sender: Any?) { store.sort = .created }
+    @objc func toggleSortDirection(_ sender: Any?) { store.sortAscending.toggle() }
+    @objc func toggleBacklinks(_ sender: Any?) { store.backlinksExpanded.toggle() }
     @objc func toggleAutosave(_ sender: Any?) { store.toggleAutosave() }
     @objc func largerText(_ sender: Any?) { store.changeFontSize(1) }
     @objc func smallerText(_ sender: Any?) { store.changeFontSize(-1) }
@@ -422,10 +428,11 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
         alert.messageText = "단축키"
         alert.informativeText = """
         파일     ⌘N 새 문서 · ⌘O 폴더 열기 · ⌘S 저장 · ⌥⌘R Finder에서 보기
-        서식    ⌘B 굵게 · ⌘I 기울임 · ⌘K 링크 · ⌘E 인라인 코드 · ⇧⌘K 코드 블록
+        서식    ⌘B 굵게 · ⌘I 기울임 · ⌘K 링크 · ⌥⌘K 위키 링크 · ⌘E 인라인 코드 · ⇧⌘K 코드 블록
         제목    ⌘1 ⌘2 ⌘3 · ⌘0 제목 해제
         목록    ⌥⌘L 글머리 · ⇧⌘L 번호 · ⇧⌘Q 인용구 · ⇧⌘D 구분선
         보기    ⌘R 미리보기 토글 · ⌘+ / ⌘- 글자 크기 · ⌃⌘S 사이드바
+        정렬    ⌥⌘1 이름 · ⌥⌘2 최근 수정 · ⌥⌘3 생성일 · ⇧⌥⌘S 방향 · ⌥⌘B 참조 목록
         편집    ⌘F 찾기 · ⇧⌘F 바꾸기 · Tab 들여쓰기 · Enter 목록 자동 이어짐
         내보내기 ⇧⌘E HTML 저장 · ⌥⇧⌘E 그림·수식 포함 · ⇧⌘B 브라우저 미리보기
         시각화  머메이드 · 코드 구문 색상 · LaTeX 수식 (보기 메뉴에서 켜고 끄기)
@@ -445,6 +452,7 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
             #selector(openInBrowser(_:)), #selector(copyHTML(_:)), #selector(copyMarkdown(_:)),
             #selector(boldText(_:)), #selector(italicText(_:)), #selector(strikeText(_:)),
             #selector(inlineCodeText(_:)), #selector(codeBlockText(_:)), #selector(insertLink(_:)),
+            #selector(insertWikiLink(_:)),
             #selector(heading1(_:)), #selector(heading2(_:)), #selector(heading3(_:)),
             #selector(clearHeading(_:)), #selector(bulletList(_:)), #selector(numberList(_:)),
             #selector(blockQuote(_:)), #selector(horizontalRule(_:)),
@@ -461,6 +469,13 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
                     return false
                 }
             case #selector(togglePreview(_:)): menuItem.state = store.previewVisible ? .on : .off
+            case #selector(sortByTitle(_:)): menuItem.state = store.sort == .title ? .on : .off
+            case #selector(sortByModified(_:)): menuItem.state = store.sort == .modified ? .on : .off
+            case #selector(sortByCreated(_:)): menuItem.state = store.sort == .created ? .on : .off
+            case #selector(toggleSortDirection(_:)):
+                menuItem.state = .off
+                menuItem.title = store.sortAscending ? "내림차순으로" : "오름차순으로"
+            case #selector(toggleBacklinks(_:)): menuItem.state = store.backlinksExpanded ? .on : .off
             default: break
             }
         }

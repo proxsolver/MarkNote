@@ -164,6 +164,7 @@ enum MainMenu {
         add(menu, "인라인 코드", #selector(MainController.inlineCodeText(_:)), "e")
         add(menu, "코드 블록", #selector(MainController.codeBlockText(_:)), "k", [.command, .shift])
         add(menu, "링크", #selector(MainController.insertLink(_:)), "k")
+        add(menu, "위키 링크 [[노트]]", #selector(MainController.insertWikiLink(_:)), "k", [.command, .option])
         menu.addItem(.separator())
         add(menu, "제목 1", #selector(MainController.heading1(_:)), "1")
         add(menu, "제목 2", #selector(MainController.heading2(_:)), "2")
@@ -184,6 +185,19 @@ enum MainMenu {
         add(menu, "사이드바 보이기/숨기기", Selector(("toggleSidebar:")), "s", [.command, .control])
         add(menu, "스크롤 동기화", #selector(MainController.toggleScrollSync(_:)))
         add(menu, "그림·수식 렌더링", #selector(MainController.toggleVisualRender(_:)))
+        menu.addItem(.separator())
+
+        let sort = NSMenuItem(title: "사이드바 정렬", action: nil, keyEquivalent: "")
+        let sortMenu = NSMenu(title: "사이드바 정렬")
+        sort.submenu = sortMenu
+        add(sortMenu, "이름", #selector(MainController.sortByTitle(_:)), "1", [.command, .option])
+        add(sortMenu, "최근 수정", #selector(MainController.sortByModified(_:)), "2", [.command, .option])
+        add(sortMenu, "생성일", #selector(MainController.sortByCreated(_:)), "3", [.command, .option])
+        sortMenu.addItem(.separator())
+        add(sortMenu, "정렬 방향 바꾸기", #selector(MainController.toggleSortDirection(_:)), "s", [.command, .option, .shift])
+        menu.addItem(sort)
+        add(menu, "이 문서를 참조 표시", #selector(MainController.toggleBacklinks(_:)), "b", [.command, .option])
+
         menu.addItem(.separator())
         add(menu, "글자 크기 키우기", #selector(MainController.largerText(_:)), "+")
         add(menu, "글자 크기 줄이기", #selector(MainController.smallerText(_:)), "-")

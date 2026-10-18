@@ -3,6 +3,16 @@ import AppKit
 extension String {
     /// `""` and missing path components behave the same way downstream.
     var nilIfEmpty: String? { isEmpty ? nil : self }
+
+    /// A note name reaches the app from two directions: a volume (and `URL.path`)
+    /// hands back Hangul *decomposed* into jamo, while text typed in the editor
+    /// stays *precomposed*. Swift's `==` bridges that gap, but `contains`, Set
+    /// lookups and the "is there a note called this" check in the preview are much
+    /// easier to trust when both sides are put in the same form first.
+    var noteKey: String { precomposedStringWithCanonicalMapping.lowercased() }
+    /// The same idea for file paths, without case folding — a case-sensitive volume
+    /// must still tell `노트.md` apart from its opposite-case twin.
+    var pathKey: String { precomposedStringWithCanonicalMapping }
 }
 
 /// A note saved as `.md` does not always hold Markdown. TextEdit — and a few

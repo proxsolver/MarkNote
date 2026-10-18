@@ -11,12 +11,26 @@ struct Doc: Hashable, Identifiable {
 }
 
 enum FormatCommand {
-    case bold, italic, strike, inlineCode, codeBlock, link, hr, quote, ul, ol, clearHeading
+    case bold, italic, strike, inlineCode, codeBlock, link, wikiLink, hr, quote, ul, ol, clearHeading
     case heading(Int)
 }
 
 enum StoreEvent {
-    case docs, document, text, ui
+    case docs, document, text, ui, links
+}
+
+/// Sidebar ordering. `created` falls back to the modification date on volumes
+/// that do not carry a birth time.
+enum DocSort: String, CaseIterable {
+    case title, modified, created
+
+    var label: String {
+        switch self {
+        case .title: return "이름"
+        case .modified: return "최근 수정"
+        case .created: return "생성일"
+        }
+    }
 }
 
 private enum Keys {
@@ -28,6 +42,9 @@ private enum Keys {
     static let autosave = "autosaveEnabled"
     static let sync = "scrollSync"
     static let visual = "visualEnabled"
+    static let sort = "docsSort"
+    static let sortAsc = "docsSortAscending"
+    static let refsExpanded = "backlinksExpanded"
 }
 
 /// All app state and file work lives here. Views subscribe with `on(_:)`.
@@ -76,6 +93,29 @@ final class Store: NSObject {
         didSet { defaults.set(Double(fontSize), forKey: Keys.fontSize); Theme.size = fontSize; emit(.ui) }
     }
 
+    /// 사이드바 정렬 기준. 고르면 즉시 목록을 다시 만들고 설정에 기억합니다.
+    var sort: DocSort {
+        didSet {
+            defaults.set(sort.rawValue, forKey: Keys.sort)
+            reloadList()
+            emit(.ui)
+        }
+    }
+
+    /// `false` = 최신/내림차순. 이름 정렬에서는 가나다·ABC 오름차순이 `true`입니다.
+    var sortAscending: Bool {
+        didSet {
+            defaults.set(sortAscending, forKey: Keys.sortAsc)
+            reloadList()
+            emit(.ui)
+        }
+    }
+
+    /// 사이드바 하단 '이 문서를 참조' 섹션 펼침 상태.
+    var backlinksExpanded: Bool {
+        didSet { defaults.set(backlinksExpanded, forKey: Keys.refsExpanded); emit(.links) }
+    }
+
     var toast: String? {
         didSet {
             guard let toast, toast != oldValue else { return }
@@ -101,12 +141,19 @@ final class Store: NSObject {
     private let defaults = UserDefaults.standard
     private var handlers: [StoreEvent: [() -> Void]] = [:]
 
+    /// Per-file dates captured during the last folder scan, so sorting never
+    /// stat()s the same path twice and `created` costs nothing extra.
+    private var dates: [String: (modified: Date, created: Date)] = [:]
+
     override init() {
         previewVisible = defaults.object(forKey: Keys.preview) as? Bool ?? true
         autosaveEnabled = defaults.object(forKey: Keys.autosave) as? Bool ?? true
         scrollSync = defaults.object(forKey: Keys.sync) as? Bool ?? true
         visualEnabled = defaults.object(forKey: Keys.visual) as? Bool ?? true
         fontSize = defaults.object(forKey: Keys.fontSize) as? CGFloat ?? 14
+        sort = DocSort(rawValue: defaults.string(forKey: Keys.sort) ?? "") ?? .modified
+        sortAscending = defaults.object(forKey: Keys.sortAsc) as? Bool ?? false
+        backlinksExpanded = defaults.object(forKey: Keys.refsExpanded) as? Bool ?? true
         super.init()
         Theme.size = fontSize
     }
@@ -131,9 +178,11 @@ final class Store: NSObject {
     // MARK: - Filtered list
 
     var visibleDocs: [Doc] {
-        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
+        let q = search.trimmingCharacters(in: .whitespaces).noteKey
         guard !q.isEmpty else { return docs }
-        return docs.filter { $0.fileName.lowercased().contains(q) || $0.title.lowercased().contains(q) }
+        // Both sides normalised: the volume stores Hangul names decomposed, the
+        // search field types them composed, and a raw `contains` finds nothing.
+        return docs.filter { $0.fileName.noteKey.contains(q) || $0.title.noteKey.contains(q) }
     }
 
     var recents: [Doc] {
@@ -209,26 +258,117 @@ final class Store: NSObject {
     // MARK: - Listing
 
     func reloadList() {
-        guard let folder else { docs = []; return }
+        guard let folder else { docs = []; dates = [:]; return }
         let fm = FileManager.default
         var found: [URL] = []
         if let en = fm.enumerator(at: folder,
-                                 includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                                 includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey, .isRegularFileKey],
                                  options: [.skipsHiddenFiles]) {
             for case let url as URL in en {
                 let ext = url.pathExtension.lowercased()
                 if ext == "md" || ext == "markdown" || ext == "mdown" { found.append(url) }
             }
         }
-        let currentPath = current?.url.path
-        docs = found.sorted { a, b in
-            if a.path == currentPath { return true }
-            if b.path == currentPath { return false }
-            let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            return da > db
-        }.map { Doc(url: $0) }
+        // One stat pass per file: sorting then never touches the disk again, and
+        // a birth time that the volume does not carry degrades to "modified".
+        var stamps: [String: (modified: Date, created: Date)] = [:]
+        for url in found {
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
+            let modified = values?.contentModificationDate ?? .distantPast
+            stamps[url.path] = (modified, values?.creationDate ?? modified)
+        }
+        dates = stamps
+        docs = orderDocs(found.map { Doc(url: $0) })
+        // The renderer needs to know which names point at a real note; the
+        // scanner needs the same list, so both are refreshed from here.
+        Markdown.noteIndex = Set(docs.map { $0.title.noteKey })
         emit(.docs)
+        refreshReferences()
+    }
+
+    /// The open note stays pinned on top whatever the order — the sidebar doubles
+    /// as "where am I" — and everything else follows the chosen key and direction.
+    private func orderDocs(_ list: [Doc]) -> [Doc] {
+        let currentPath = current?.url.path
+        func ascending(_ a: Doc, _ b: Doc) -> Bool {
+            switch sort {
+            case .title:
+                let order = a.title.localizedStandardCompare(b.title)
+                if order != .orderedSame { return order == .orderedAscending }
+                return a.url.path < b.url.path
+            case .modified, .created:
+                let lhs = stamp(a.url.path), rhs = stamp(b.url.path)
+                if lhs != rhs { return lhs < rhs }
+                return a.title.localizedStandardCompare(b.title) == .orderedAscending
+            }
+        }
+        return list.sorted { a, b in
+            let pinnedA = a.url.path == currentPath, pinnedB = b.url.path == currentPath
+            if pinnedA != pinnedB { return pinnedA }
+            return sortAscending ? ascending(a, b) : ascending(b, a)
+        }
+    }
+
+    private func stamp(_ path: String) -> Date {
+        let record = dates[path] ?? (modified: .distantPast, created: .distantPast)
+        switch sort {
+        case .created: return record.created
+        case .modified, .title: return record.modified
+        }
+    }
+
+    // MARK: - Backlinks
+
+    /// Other notes that point at a note, plus everything the open note points to.
+    private(set) var linkIndex = LinkIndex()
+
+    private let refScanner = ReferenceScanner()
+
+    /// 어떤 노트를 가리키는 이름인지 다른 노트들이 얼마나 참조하는지.
+    func backlinks(to doc: Doc) -> [Reference] { linkIndex.backlinks(to: doc.title.noteKey) }
+    func backlinks(toTarget name: String) -> [Reference] { linkIndex.backlinks(to: name.noteKey) }
+    func outgoingLinks(from doc: Doc) -> [Reference] { linkIndex.outgoing(from: doc.url.path) }
+
+    /// 폴더를 한 번 훑어 참조 인덱스를 다시 만듭니다. 읽기는 백그라운드, 방출은
+    /// 메인 — 이전에 크래시로 배운 대로 뷰를 건드리는 순간은 메인뿐입니다.
+    func refreshReferences() {
+        let list = docs
+        let stamps = dates
+        refScanner.refresh(docs: list, dates: stamps) { [weak self] built in
+            guard let self else { return }
+            self.linkIndex = built
+            self.emit(.links)
+        }
+    }
+
+    /// `[[이름]]` 대상 찾기. 확장자 유무·대소문자·빈칸 차이에는 상관없이, 또 서브폴더에
+    /// 있어도 목록에서 찾습니다.
+    func doc(named target: String) -> Doc? {
+        let key = Markdown.wikiLink(target: target, index: []).name
+        let needle = key.isEmpty ? target.trimmingCharacters(in: .whitespaces).noteKey : key
+        guard !needle.isEmpty else { return nil }
+        if let exact = docs.first(where: { $0.title.noteKey == needle }) { return exact }
+        return docs.first { $0.fileName.noteKey == needle + ".md" }
+    }
+
+    /// 위키링크를 따라 이동합니다. 없으면 만들지 않고 알려줍니다(사용자가 고른 동작).
+    @discardableResult
+    func openNote(named target: String) -> Bool {
+        guard let doc = doc(named: target) else {
+            toast = "『\(target)』 노트는 이 폴더에 없습니다"
+            return false
+        }
+        select(doc)
+        return true
+    }
+
+    /// 참조 행을 클릭했을 때. 파일이 이동/삭제돼 목록에 없으면 조용히 아무 일도 없습니다.
+    @discardableResult
+    func openReference(_ ref: Reference) -> Bool {
+        let from = ref.fromPath.pathKey
+        guard let doc = docs.first(where: { $0.url.path.pathKey == from }) else { return false }
+        select(doc)
+        return true
     }
 
     // MARK: - Selection
@@ -241,6 +381,10 @@ final class Store: NSObject {
         defaults.set(doc.url.path, forKey: Keys.lastDoc)
         pushRecent(doc.url)
         load(doc)
+        // Re-order now rather than at the next disk poll, so the open note takes
+        // its pinned place at once and the list never jumps a few seconds later.
+        if !docs.isEmpty { docs = orderDocs(docs) }
+        emit(.docs)
         emit(.document)
         emit(.ui)
         window?.makeFirstResponder(editor)
@@ -411,6 +555,13 @@ final class Store: NSObject {
             isDirty = false
             savedAt = Date()
             diskModified = (try? doc.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+            // The just-saved note is the one file whose links may have changed, so
+            // hand the scanner its new timestamp — otherwise the mtime cache would
+            // keep serving the pre-save references.
+            if let m = diskModified {
+                dates[doc.url.path] = (modified: m, created: dates[doc.url.path]?.created ?? m)
+            }
+            refreshReferences()
             emit(.ui)
         } catch {
             toast = "저장 실패: \(error.localizedDescription)"
@@ -512,6 +663,7 @@ final class Store: NSObject {
         case .inlineCode: Editing.toggleWrap(tv, "`", "`", placeholder: "code")
         case .codeBlock: Editing.toggleCodeBlock(tv)
         case .link: Editing.insertLink(tv)
+        case .wikiLink: Editing.toggleWrap(tv, "[[", "]]", placeholder: "노트 이름")
         case .hr: Editing.insertHR(tv)
         case .quote: Editing.toggleQuote(tv)
         case .ul: Editing.toggleList(tv, ordered: false)

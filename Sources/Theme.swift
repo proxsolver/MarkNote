@@ -78,6 +78,7 @@ enum Highlighter {
         Rule("(?<![\\w_])_[^_\\n]+_(?![\\w_])", color: Theme.emphasis),
         Rule("~~[^~\\n]+~~", color: Theme.muted),
         Rule("!?\\[[^\\]\\n]*\\]\\([^)\\n]*\\)", color: Theme.link, underline: true),
+        Rule("\\[\\[[^\\]\\n]*\\]\\]", color: Theme.link, underline: true),
         Rule("^(\\s*)(-{3,}|\\*{3,}|_{3,})\\s*$", options: [.anchorsMatchLines], color: Theme.marker),
         Rule("^(\\s*)([-*+]|\\d+[.)])(?= )", options: [.anchorsMatchLines], color: Theme.marker),
     ]

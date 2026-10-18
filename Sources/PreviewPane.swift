@@ -118,6 +118,11 @@ final class PreviewController: NSViewController, WKNavigationDelegate, WKScriptM
                     } else {
                         NSWorkspace.shared.open(target)
                     }
+                } else if let last = url.pathComponents.last,
+                          Markdown.isReadableTextFile(URL(fileURLWithPath: last)) {
+                    // A wiki link to a note in a subfolder resolves to a sibling path
+                    // that does not exist — look the name up in the note list instead.
+                    store.openNote(named: (last as NSString).deletingPathExtension)
                 }
             } else {
                 NSWorkspace.shared.open(url)

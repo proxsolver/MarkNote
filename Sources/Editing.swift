@@ -7,18 +7,30 @@ enum Editing {
 
     // MARK: - Plumbing
 
-    static func replace(_ tv: NSTextView, _ range: NSRange, _ string: String, selection: NSRange? = nil) {
+    /// One text mutation, one undo step.
+    ///
+    /// AppKit registers undo only for edits that arrive through an input event, so a
+    /// command-driven replacement — bold, a list toggle, a pasted picture — would sit
+    /// outside ⌘Z. Put it back by hand: the same call re-registers the inverse while
+    /// the manager is undoing, so redo comes along for free.
+    static func replace(_ tv: NSTextView, _ range: NSRange, _ string: String, selection: NSRange? = nil,
+                        undoLabel: String = "") {
         let ns = tv.string as NSString
         guard range.location >= 0, range.upperBound <= ns.length else { return }
         guard tv.shouldChangeText(in: range, replacementString: string) else { return }
+        let previous = ns.substring(with: range)
+        let restore = selection ?? NSRange(location: range.location + (string as NSString).length, length: 0)
+
         tv.textStorage?.replaceCharacters(in: range, with: string)
         tv.didChangeText()
-        if let selection {
-            tv.setSelectedRange(selection)
-        } else {
-            tv.setSelectedRange(NSRange(location: range.location + (string as NSString).length, length: 0))
+        tv.setSelectedRange(restore)
+        tv.scrollRangeToVisible(restore)
+
+        guard previous != string, let undo = tv.undoManager else { return }
+        undo.registerUndo(withTarget: tv) { view in
+            replace(view, range, previous, selection: restore, undoLabel: undoLabel)
         }
-        tv.scrollRangeToVisible(tv.selectedRange())
+        if !undoLabel.isEmpty { undo.setActionName(undoLabel) }
     }
 
     static func lineRanges(_ ns: NSString) -> [NSRange] {

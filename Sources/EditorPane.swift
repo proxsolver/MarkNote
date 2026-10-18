@@ -27,7 +27,7 @@ final class EditorController: NSViewController, NSTextViewDelegate {
         scroll.contentInsets = NSEdgeInsets(top: 10, left: 0, bottom: 24, right: 0)
         scroll.scrollerInsets = NSEdgeInsets(top: -10, left: 0, bottom: -24, right: 0)
 
-        textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 800))
+        textView = NoteTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 800))
         textView.autoresizingMask = [.width]
         textView.isRichText = false
         textView.allowsUndo = true
@@ -57,6 +57,13 @@ final class EditorController: NSViewController, NSTextViewDelegate {
         textView.string = store.text
         textView.typingAttributes = [.font: Theme.base, .foregroundColor: Theme.text]
         if let storage = textView.textStorage { Highlighter.apply(to: storage) }
+        (textView as? NoteTextView)?.noteStore = store
+
+        // AppKit only offers a view the drag types it registered for, so pictures
+        // and dropped files have to be added to whatever a text view already takes.
+        var dragged = textView.registeredDraggedTypes
+        for extra in Attachments.pasteboardTypes where !dragged.contains(extra) { dragged.append(extra) }
+        textView.registerForDraggedTypes(dragged)
 
         scroll.documentView = textView
         scroll.contentView.postsBoundsChangedNotifications = true
@@ -170,5 +177,38 @@ final class EditorController: NSViewController, NSTextViewDelegate {
         let y = max(0, min(docHeight, fraction * docHeight))
         clip.scroll(to: NSPoint(x: 0, y: y))
         scroll.reflectScrolledClipView(clip)
+    }
+}
+
+/// The plain-text editor, plus the one thing plain text views refuse to do:
+/// accept a picture. A rich text view would embed the bitmap in the document,
+/// which is exactly what a Markdown note must not become, so `isRichText` and
+/// `importsGraphics` stay off and pasted or dropped images are handed to
+/// `Store.insertImages` — a file in `assets/` and a Markdown link at the caret.
+final class NoteTextView: NSTextView {
+    weak var noteStore: Store?
+
+    override func paste(_ sender: Any?) {
+        if let noteStore, noteStore.insertPasteboardImage(.general, into: self) { return }
+        super.paste(sender)
+    }
+
+    override func pasteAsPlainText(_ sender: Any?) {
+        if let noteStore, noteStore.insertPasteboardImage(.general, into: self) { return }
+        super.pasteAsPlainText(sender)
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard Attachments.hasImage(sender.draggingPasteboard) else { return super.draggingEntered(sender) }
+        return .copy
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        Attachments.hasImage(sender.draggingPasteboard) || super.prepareForDragOperation(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if let noteStore, noteStore.insertPasteboardImage(sender.draggingPasteboard, into: self) { return true }
+        return super.performDragOperation(sender)
     }
 }

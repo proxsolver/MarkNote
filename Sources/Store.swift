@@ -580,6 +580,65 @@ final class Store: NSObject {
         NSWorkspace.shared.open(folder)
     }
 
+    // MARK: - Attachments (이미지 붙여넣기·드롭)
+
+    /// Pictures from the clipboard or a drag are copied into `assets/` beside the
+    /// open note and a Markdown link is written where the caret sits. The text goes
+    /// in through `Editing.replace`, so it is a single undo step, and the autosave
+    /// that follows archives the pre-edit bytes to 저장 히스토리 like any keystroke.
+    ///
+    /// `false` means "nothing image-like was offered" — the caller then lets AppKit
+    /// paste the text it was handed, which is why the whole feature can hang off
+    /// `paste(_:)` without touching normal pasting.
+    @discardableResult
+    func insertImages(_ incoming: [Attachments.Incoming], into tv: NSTextView) -> Bool {
+        guard !incoming.isEmpty else { return false }
+        guard let doc = current else {
+            toast = "노트를 먼저 열어 주세요 — 이미지는 노트 옆 \(Attachments.directoryName)/에 저장됩니다"
+            return true
+        }
+
+        let noteDirectory = doc.url.deletingLastPathComponent()
+        var links: [String] = []
+        var stored = 0
+        var lastFailure: Attachments.Failure?
+
+        for item in incoming {
+            // Already living under this note's folder: reference it, do not copy it.
+            if let source = item.source, let inPlace = Attachments.linkInPlace(source, noteDirectory: noteDirectory) {
+                links.append(Attachments.markdown(alt: Attachments.alt(for: item.stem), src: inPlace))
+                continue
+            }
+            switch Attachments.place(item.data, ext: item.ext, stem: item.stem, noteDirectory: noteDirectory) {
+            case .success(let placed):
+                links.append(Attachments.markdown(alt: Attachments.alt(for: item.stem), src: placed.relative))
+                if !placed.reused { stored += 1 }
+            case .failure(let failure):
+                lastFailure = failure
+            }
+        }
+
+        guard !links.isEmpty else {
+            toast = Attachments.explain(lastFailure)
+            return true
+        }
+
+        let block = links.joined(separator: "\n\n")
+        let drop = Attachments.plan(in: tv.string as NSString, selection: tv.selectedRange(), block: block)
+        Editing.replace(tv, drop.range, drop.string, selection: drop.selection, undoLabel: "이미지 붙여넣기")
+
+        let head = links.count > 1 ? "이미지 \(links.count)개를 " : "이미지를 "
+        toast = stored > 0
+            ? head + "\(Attachments.directoryName)/에 저장하고 링크했습니다"
+            : head + "링크만 넣었습니다 — 같은 이미지가 이미 \(Attachments.directoryName)/에 있습니다"
+        return true
+    }
+
+    @discardableResult
+    func insertPasteboardImage(_ pasteboard: NSPasteboard, into tv: NSTextView) -> Bool {
+        insertImages(Attachments.read(pasteboard), into: tv)
+    }
+
     // MARK: - Editing / saving
 
     func editorChanged(_ newValue: String) {

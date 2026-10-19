@@ -110,3 +110,33 @@ extension Date {
         }
     }
 }
+
+/// A note's bytes exactly as they sit on disk. History stores and compares these
+/// rather than the editor's text, so a note that is really RTF wearing a `.md`
+/// name (see `DocumentText`) can be handed back as the RTF it was — not as a
+/// UTF-8 re-encoding of what the editor happened to display.
+///
+/// Lives here, next to the other file-reading helpers, because Markdown needs it
+/// too (an export carries its pictures as data URIs) and Markdown is verified on
+/// its own without the history code.
+enum DocumentBytes {
+    /// Above this a note is not archived on the main thread — copying it during an
+    /// autosave would be felt as a stall. `NoteHistory.maxBytes` is this number.
+    static let softLimit = 8_000_000
+
+    /// `nil` when there is nothing to keep: no file, a directory, or one too big.
+    static func read(_ url: URL, maxBytes: Int = softLimit) -> Data? {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true,
+              let size = values.fileSize, size <= maxBytes else { return nil }
+        return try? Data(contentsOf: url)
+    }
+
+    /// First `maxBytes` of a file, for a cheap one-line preview of a snapshot.
+    static func head(_ url: URL, maxBytes: Int = 8_192) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let data = (try? handle.read(upToCount: maxBytes)) ?? Data()
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+    }
+}

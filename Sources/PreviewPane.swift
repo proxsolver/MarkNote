@@ -110,6 +110,12 @@ final class PreviewController: NSViewController, WKNavigationDelegate, WKScriptM
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
+            // `#태그` 칩: 스크롤을 옮기지 않고 사이드바 필터만 바꿉니다.
+            if let fragment = url.fragment, let key = Tags.key(fromFragment: fragment) {
+                store.toggleTag(key)
+                decisionHandler(.cancel)
+                return
+            }
             if url.scheme == Vendor.scheme {
                 // marknote:// links are files next to the document.
                 if let target = schemeHandler.file(for: url) {

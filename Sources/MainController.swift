@@ -307,6 +307,9 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
             menu.addItem(withTitle: "브라우저로 미리보기", action: #selector(openInBrowser(_:)), keyEquivalent: "")
             menu.addItem(withTitle: "HTML로 복사", action: #selector(copyHTML(_:)), keyEquivalent: "")
             menu.addItem(.separator())
+            menu.addItem(withTitle: "PDF로 내보내기…", action: #selector(exportPDF(_:)), keyEquivalent: "")
+            menu.addItem(withTitle: "인쇄…", action: #selector(printNote(_:)), keyEquivalent: "")
+            menu.addItem(.separator())
             menu.addItem(withTitle: "Finder에서 보기", action: #selector(revealInFinder(_:)), keyEquivalent: "")
             menu.addItem(withTitle: "이름 변경…", action: #selector(renameDocument(_:)), keyEquivalent: "")
             menu.addItem(withTitle: "휴지통으로 이동", action: #selector(deleteDocument(_:)), keyEquivalent: "")
@@ -363,6 +366,9 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
     @objc func openFolderInFinder(_ sender: Any?) { store.openFolderInFinder() }
     @objc func exportHTML(_ sender: Any?) { store.exportHTML() }
     @objc func exportHTMLRich(_ sender: Any?) { store.exportHTMLRich() }
+    /// A4 PDF로 저장 — 뽑을 때만 라이트 팔레트로 다시 그립니다.
+    @objc func exportPDF(_ sender: Any?) { store.exportPDF() }
+    @objc func printNote(_ sender: Any?) { store.printCurrent() }
     @objc func openInBrowser(_ sender: Any?) { store.openInBrowser() }
     @objc func copyHTML(_ sender: Any?) { store.copyHTML() }
     @objc func copyMarkdown(_ sender: Any?) { store.copyPlainMarkdown() }
@@ -374,6 +380,8 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
     @objc func codeBlockText(_ sender: Any?) { store.run(.codeBlock) }
     @objc func insertLink(_ sender: Any?) { store.run(.link) }
     @objc func insertWikiLink(_ sender: Any?) { store.run(.wikiLink) }
+    /// 본문에 흩어진 '제목 언급'을 실제 `[[링크]]`로 바꿉니다(되돌리기는 ⌘Z).
+    @objc func promoteMentions(_ sender: Any?) { store.promoteMentions() }
     @objc func heading1(_ sender: Any?) { store.run(.heading(1)) }
     @objc func heading2(_ sender: Any?) { store.run(.heading(2)) }
     @objc func heading3(_ sender: Any?) { store.run(.heading(3)) }
@@ -461,11 +469,15 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
         서식    ⌘B 굵게 · ⌘I 기울임 · ⌘K 링크 · ⌥⌘K 위키 링크 · ⌘E 인라인 코드 · ⇧⌘K 코드 블록
         제목    ⌘1 ⌘2 ⌘3 · ⌘0 제목 해제
         목록    ⌥⌘L 글머리 · ⇧⌘L 번호 · ⇧⌘Q 인용구 · ⇧⌘D 구분선
+        태그    본문에 #태그 · 사이드바 칩이나 미리보기 칩을 누르면 그 태그만 좁혀 봅니다
+        연결    ⌥⌘M 다른 노트 제목으로 적힌 곳을 [[링크]]로 · ⌘Z로 되돌리기
         보기    ⌘R 미리보기 토글 · ⌘+ / ⌘- 글자 크기 · ⌃⌘S 사이드바
         정렬    ⌥⌘1 이름 · ⌥⌘2 최근 수정 · ⌥⌘3 생성일 · ⇧⌥⌘S 방향 · ⌥⌘B 참조 목록
         히스토리 ⌃⌘H 저장 히스토리 · ⇧⌥⌘H 히스토리 폴더 · 되돌리기는 확인 후 실행
         편집    ⌘F 찾기 · ⌥⌘F 바꾸기 · Tab 들여쓰기 · Enter 목록 자동 이어짐
         내보내기 ⇧⌘E HTML 저장 · ⌥⇧⌘E 그림·수식 포함 · ⇧⌘B 브라우저 미리보기
+        사진     ⌘V 붙여넣기 · 편집기에 끌어놓기 → 노트 옆 assets/에 저장하고 그 자리에 링크
+        종이     ⌘P 인쇄 · ⇧⌘P PDF로 저장 — 화면이 다크해도 종이는 언제나 흰 바탕에 검은 글자
         시각화  머메이드 · 코드 구문 색상 · LaTeX 수식 (보기 메뉴에서 켜고 끄기)
         """
         alert.addButton(withTitle: "확인")
@@ -479,11 +491,11 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
         let needsDoc: Set<Selector> = [
             #selector(saveDocument(_:)), #selector(revertToDisk(_:)), #selector(renameDocument(_:)),
             #selector(deleteDocument(_:)), #selector(revealInFinder(_:)), #selector(exportHTML(_:)),
-            #selector(exportHTMLRich(_:)),
+            #selector(exportHTMLRich(_:)), #selector(exportPDF(_:)), #selector(printNote(_:)),
             #selector(openInBrowser(_:)), #selector(copyHTML(_:)), #selector(copyMarkdown(_:)),
             #selector(boldText(_:)), #selector(italicText(_:)), #selector(strikeText(_:)),
             #selector(inlineCodeText(_:)), #selector(codeBlockText(_:)), #selector(insertLink(_:)),
-            #selector(insertWikiLink(_:)),
+            #selector(insertWikiLink(_:)), #selector(promoteMentions(_:)),
             #selector(heading1(_:)), #selector(heading2(_:)), #selector(heading3(_:)),
             #selector(clearHeading(_:)), #selector(bulletList(_:)), #selector(numberList(_:)),
             #selector(blockQuote(_:)), #selector(horizontalRule(_:)),
@@ -508,6 +520,13 @@ final class MainController: NSWindowController, NSWindowDelegate, NSToolbarDeleg
                 menuItem.state = .off
                 menuItem.title = store.sortAscending ? "내림차순으로" : "오름차순으로"
             case #selector(toggleBacklinks(_:)): menuItem.state = store.backlinksExpanded ? .on : .off
+            case #selector(promoteMentions(_:)):
+                // 몇 개를 바꿀 수 있는지 메뉴에 적어 둡니다. 눌렀을 때 아무 일도 일어나지
+                // 않는 명령이 제일 혼란스럽습니다.
+                let count = store.promotableCount
+                menuItem.state = .off
+                menuItem.title = count > 0 ? "제목 언급을 위키링크로 (\(count))" : "제목 언급을 위키링크로"
+                return count > 0
             case #selector(toggleHistoryKeeping(_:)): menuItem.state = store.historyEnabled ? .on : .off
             case #selector(clearCurrentHistory(_:)):
                 // 비울 것이 없으면 메뉴 회색으로 — "지웠습니다" 토스트가 거짓말이 되지 않게.

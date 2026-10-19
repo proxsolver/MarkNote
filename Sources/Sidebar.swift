@@ -14,6 +14,9 @@ final class SidebarController: NSViewController, NSTableViewDataSource, NSTableV
     private var sortPopup: NSPopUpButton!
     private var sortDirectionButton: NSButton!
 
+    /// `#태그` 칩 칸 — 검색/정렬 바와 문서 목록 사이.
+    private var tagBar: TagChipBar!
+
     // "Notes that reference this one" panel under the document list.
     private var refsHeader: NSButton!
     private var refsBox: NSStackView!
@@ -119,9 +122,11 @@ final class SidebarController: NSViewController, NSTableViewDataSource, NSTableV
         folderLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let sortBar = makeSortBar()
+        tagBar = TagChipBar(frame: NSRect(x: 0, y: 0, width: 200, height: 20))
+        tagBar.onPick = { [weak self] key in self?.pickTag(key) }
         let refs = makeRefsPanel()
 
-        let subs: [NSView] = [header, search, sortBar, scroll, refs.header, refs.box, footer]
+        let subs: [NSView] = [header, search, sortBar, tagBar, scroll, refs.header, refs.box, footer]
         for sub in subs {
             sub.translatesAutoresizingMaskIntoConstraints = false
             effect.addSubview(sub)
@@ -158,9 +163,14 @@ final class SidebarController: NSViewController, NSTableViewDataSource, NSTableV
 
             refs.box.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -4),
 
-            scroll.topAnchor.constraint(equalTo: sortBar.bottomAnchor, constant: 7),
+            scroll.topAnchor.constraint(equalTo: tagBar.bottomAnchor, constant: 6),
             scroll.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
+
+            // 높이는 칩 칸이 intrinsic content size로 스스로 정합니다 — 태그가 없으면 0.
+            tagBar.topAnchor.constraint(equalTo: sortBar.bottomAnchor, constant: 5),
+            tagBar.leadingAnchor.constraint(equalTo: effect.leadingAnchor, constant: 8),
+            tagBar.trailingAnchor.constraint(equalTo: effect.trailingAnchor, constant: -8),
         ])
 
         refsHeight = refs.box.heightAnchor.constraint(equalToConstant: 0)
@@ -194,7 +204,34 @@ final class SidebarController: NSViewController, NSTableViewDataSource, NSTableV
         store.on(.docs) { [weak self] in self?.refresh() }
         store.on(.document) { [weak self] in self?.refresh() }
         store.on(.ui) { [weak self] in self?.refresh() }
-        store.on(.links) { [weak self] in self?.refreshRefs() }
+        store.on(.links) { [weak self] in
+            self?.refreshRefs()
+            self?.refreshTagBar()
+        }
+    }
+
+    // MARK: - 태그 필터
+
+    /// 칩을 누른 동작. nil은 "필터 해제" 칸입니다.
+    private func pickTag(_ key: String?) {
+        guard let key else {
+            store.clearTagFilter()
+            store.toast = "태그 필터 해제"
+            return
+        }
+        store.toggleTag(key)
+    }
+
+    /// 인덱스가 갱신될 때마다(저장·폴더 갱신) 칩 칸을 다시 채웁니다. 목록 자체는
+    /// `tagFilter`가 바뀔 때 `.docs`를 보내므로 여기서 `reloadData`를 부르지 않습니다.
+    private func refreshTagBar() {
+        guard let tagBar else { return }
+        let chips = store.tagChips
+        tagBar.set(entries: chips, selected: store.tagFilter)
+        countLabel?.stringValue = chips.isEmpty
+            ? "\(store.docs.count)"
+            : "\(store.visibleDocs.count)/\(store.docs.count)"
+        countLabel?.toolTip = store.tagFilter.map { "#\($0) 로 필터 중 — 칩을 다시 누르면 해제" }
     }
 
     // MARK: - Sorting
@@ -329,9 +366,9 @@ final class SidebarController: NSViewController, NSTableViewDataSource, NSTableV
         selectRow(forCurrentDoc: true)
         folderLabel?.stringValue = store.folder?.lastPathComponent ?? ""
         folderLabel?.toolTip = store.folder?.path
-        countLabel?.stringValue = store.docs.isEmpty ? "" : "\(store.docs.count)"
         syncSortControls()
         refreshRefs()
+        refreshTagBar()
     }
 
     private func selectRow(forCurrentDoc: Bool) {
@@ -533,6 +570,160 @@ private final class RefRowView: NSView {
 }
 
 private enum SidebarMetrics { static let refRow: CGFloat = 32 }
+
+/// 태그 칩이 줄지어 서는 칸.
+///
+/// 사이드바는 190pt 남짓이라 칩이 세로로 길게 늘어서면 문서 목록이 화면에서 사라집니다.
+/// 그래서 폭에 맞춰 스스로 접고, `maxRows`를 넘으면 나머지를 "+N" 하나로 접어버립니다.
+/// 높이는 intrinsic content size로 주니 상위 제약식(정렬 바 ↔ 목록 사이)은 모른 채로 끝납니다.
+final class TagChipBar: NSView {
+    /// 칩을 누르면 호출된다. nil은 "필터 해제".
+    var onPick: ((String?) -> Void)?
+    /// 지금 목록에 실제로 표시된 키(하나라도 잘려나갔는지 확인용).
+    private(set) var shownKeys: [String] = []
+
+    private static let font = NSFont.systemFont(ofSize: 10.5, weight: .medium)
+    private static let rowHeight: CGFloat = 18
+    private static let gap: CGFloat = 4
+    private static let sidePadding: CGFloat = 8
+    /// 접히기 시작하는 줄. 3줄이면 목록이 아직 보인다.
+    static let maxRows = 3
+
+    private var specs: [Spec] = []
+    private var chips: [NSButton] = []
+    private var height: CGFloat = 0
+
+    private struct Spec {
+        let key: String?
+        let label: String
+        let on: Bool
+        let clear: Bool
+        var width: CGFloat {
+            TagChipBar.measuredWidth(of: label) + (clear ? 2 : 0)
+        }
+    }
+
+    override var isFlipped: Bool { true }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: height)
+    }
+
+    func set(entries: [Tag], selected: String?) {
+        var built: [Spec] = []
+        if selected != nil {
+            built.append(Spec(key: nil, label: "필터 해제", on: false, clear: true))
+        }
+        for tag in entries {
+            let name = "#" + tag.name + (tag.count > 1 ? " \(tag.count)" : "")
+            built.append(Spec(key: tag.key, label: name, on: tag.key == selected, clear: false))
+        }
+        specs = built
+        // 즉시 배치합니다. 창 밖(테스트)에서도 높이가 정해져야 하고, 폭이 바뀌지 않는
+        // 한 AppKit은 레이아웃을 다시 시키지 않아 칩 칸이 비어 보일 수 있습니다.
+        layout()
+    }
+
+    override func layout() {
+        super.layout()
+        let available = max(72, bounds.width)
+        let visible = plan(specs, available: available)
+
+        while chips.count < visible.count {
+            let chip = makeChip()
+            chips.append(chip)
+            addSubview(chip)
+        }
+        shownKeys = visible.compactMap { $0.key }
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var row = 0
+        for (index, spec) in visible.enumerated() {
+            if x > 0, x + spec.width > available {
+                x = 0
+                row += 1
+                y = CGFloat(row) * (Self.rowHeight + Self.gap)
+            }
+            let button = chips[index]
+            button.frame = NSRect(x: x, y: y, width: spec.width, height: Self.rowHeight)
+            configure(button, spec: spec)
+            x += spec.width + Self.gap
+        }
+        for index in visible.count..<chips.count { chips[index].isHidden = true }
+
+        let rows = Self.rows(visible, available: available)
+        let final = visible.isEmpty ? 0
+            : CGFloat(rows) * Self.rowHeight + CGFloat(max(0, rows - 1)) * Self.gap
+        if final != height {
+            height = final
+            invalidateIntrinsicContentSize()
+        }
+    }
+
+    /// 전부 담으려는 시도부터 한 개씩 접어, `maxRows`에 들어오는 첫 모양을 고릅니다.
+    /// 접힌 개수는 "+N" 칩 하나로 표시되니, 접을 때마다 자리 하나를 더 비워야 합니다.
+    private func plan(_ list: [Spec], available: CGFloat) -> [Spec] {
+        for keep in stride(from: list.count, through: 0, by: -1) {
+            var candidate = Array(list.prefix(keep))
+            if keep < list.count {
+                candidate.append(Spec(key: nil, label: "+\(list.count - keep)", on: false, clear: true))
+            }
+            if Self.rows(candidate, available: available) <= Self.maxRows { return candidate }
+        }
+        return []
+    }
+
+    /// 폭 안에서 칩이 몇 줄이 되는지 — 배치와 같은 계산을 쓰면 재는 것과 어긋나지 않습니다.
+    private static func rows(_ list: [Spec], available: CGFloat) -> Int {
+        guard !list.isEmpty else { return 0 }
+        var x: CGFloat = 0, rows = 1
+        for spec in list {
+            if x > 0, x + spec.width > available {
+                x = 0
+                rows += 1
+            }
+            x += spec.width + gap
+        }
+        return rows
+    }
+
+    private static func measuredWidth(of text: String) -> CGFloat {
+        ceil(text.size(withAttributes: [.font: font]).width) + sidePadding * 2
+    }
+
+    private func makeChip() -> NSButton {
+        let button = NSButton(title: "", target: self, action: #selector(pick(_:)))
+        button.isBordered = false
+        button.bezelStyle = .regularSquare
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 8
+        button.font = Self.font
+        button.setButtonType(.momentaryChange)
+        button.translatesAutoresizingMaskIntoConstraints = true
+        return button
+    }
+
+    private func configure(_ button: NSButton, spec: Spec) {
+        button.isHidden = false
+        button.title = spec.label
+        button.identifier = NSUserInterfaceItemIdentifier(spec.key ?? "")
+        button.tag = spec.on ? 1 : 0
+        let on = spec.on
+        let clear = spec.clear
+        button.layer?.backgroundColor = (on ? NSColor.controlAccentColor
+                                            : clear ? NSColor.quaternaryLabelColor
+                                                    : NSColor.controlColor.withAlphaComponent(0.6)).cgColor
+        button.contentTintColor = on ? .white : (clear ? .secondaryLabelColor : .labelColor)
+        button.toolTip = clear ? (spec.label == "필터 해제" ? "태그 필터를 걷어냅니다" : "태그가 많아 접혔습니다")
+                              : "\(spec.label) — 클릭하면 이 태그만 봅니다"
+        button.setAccessibilityLabel(spec.label)
+    }
+
+    @objc private func pick(_ sender: NSButton) {
+        let raw = sender.identifier?.rawValue ?? ""
+        onPick?(raw.isEmpty ? nil : raw)
+    }
+}
 
 private final class DocCellView: NSView {
     private let icon = NSImageView()

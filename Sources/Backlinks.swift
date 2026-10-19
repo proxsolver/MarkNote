@@ -67,7 +67,14 @@ struct LinkIndex {
     var linkedNoteCount: Int { byTarget.keys.count }
 }
 
-/// Reads every note in the folder once and turns them into a `LinkIndex`.
+/// 한 번의 폴더 훑기가 낳는 두 개의 표 — 참조와 태그는 같은 줄을 읽는다.
+struct FolderScan {
+    let links: LinkIndex
+    let tags: TagIndex
+}
+
+/// Reads every note in the folder once and turns them into a `LinkIndex` and a
+/// `TagIndex`.
 ///
 /// The cache is touched only from the scanner's own serial queue, and the result
 /// is handed back on the main thread, so no view is ever reached from a worker.
@@ -76,7 +83,7 @@ struct LinkIndex {
 /// report in the README's history is exactly that mistake.
 final class ReferenceScanner {
     private let queue = DispatchQueue(label: "com.marknote.references", qos: .utility, autoreleaseFrequency: .workItem)
-    private var cache: [String: (modified: Date, refs: [Reference])] = [:]
+    private var cache: [String: (modified: Date, refs: [Reference], tags: [String])] = [:]
 
     /// Skips notes above this size; a 1 MB wall of text is not worth indexing on
     /// every keystroke-triggered refresh.
@@ -89,36 +96,48 @@ final class ReferenceScanner {
     private static let mdPattern = #"\[[^\]]*\]\(<?([^)>\s]+)>?"#
 
     /// Deliver a fresh index for `docs` on the main thread. `onMain` runs on main.
-    func refresh(docs: [Doc], dates: [String: (modified: Date, created: Date)], onMain: @escaping (LinkIndex) -> Void) {
+    func refresh(docs: [Doc], dates: [String: (modified: Date, created: Date)],
+                 onMain: @escaping (FolderScan) -> Void) {
         queue.async { [weak self] in
             guard let self else { return }
             let titles = docs.map { $0.title.noteKey }
             let mention = Self.mentionRegex(titles: titles)
             var collected: [Reference] = []
-            var next: [String: (Date, [Reference])] = [:]
+            var tagged: [(path: String, tags: [String])] = []
+            var next: [String: (Date, [Reference], [String])] = [:]
 
             for doc in docs {
                 let modified = dates[doc.url.path]?.modified ?? .distantPast
                 if let cached = self.cache[doc.url.path], cached.modified == modified {
-                    next[doc.url.path] = cached
+                    next[doc.url.path] = (cached.modified, cached.refs, cached.tags)
                     collected.append(contentsOf: cached.refs)
+                    tagged.append((doc.url.path, cached.tags))
                     continue
                 }
-                let refs = Self.scan(doc: doc, allTitles: titles, mention: mention)
-                next[doc.url.path] = (modified, refs)
-                collected.append(contentsOf: refs)
+                let found = Self.gather(doc: doc, allTitles: titles, mention: mention)
+                next[doc.url.path] = (modified, found.refs, found.tags)
+                collected.append(contentsOf: found.refs)
+                tagged.append((doc.url.path, found.tags))
             }
             self.cache = next
-            let built = LinkIndex(collected)
+            let built = FolderScan(links: LinkIndex(collected), tags: TagIndex(tagged))
             DispatchQueue.main.async { onMain(built) }
         }
     }
 
-    /// One pass over a note's text. `onlyIfChanged` cache handling lives in `refresh`.
+    /// References only — the shape `scan` has always had, kept for tests and callers
+    /// that do not care about tags.
     static func scan(doc: Doc, allTitles: [String], mention: NSRegularExpression?) -> [Reference] {
+        gather(doc: doc, allTitles: allTitles, mention: mention).refs
+    }
+
+    /// One pass over a note's text. References and tags come out of the same read
+    /// because both need the same "skip the fenced example" decision.
+    static func gather(doc: Doc, allTitles: [String],
+                       mention: NSRegularExpression?) -> (refs: [Reference], tags: [String]) {
         let size = (try? doc.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        if size > maxBytes { return [] }
-        guard let text = try? String(contentsOf: doc.url, encoding: .utf8) else { return [] }
+        if size > maxBytes { return ([], []) }
+        guard let text = try? String(contentsOf: doc.url, encoding: .utf8) else { return ([], []) }
         let myself = doc.title.noteKey
         var found: [String: Reference] = [:]
 
@@ -130,34 +149,25 @@ final class ReferenceScanner {
             found[key] = ref
         }
 
-        var insideFence = false
-        for (offset, rawLine) in text.components(separatedBy: "\n").enumerated() {
-            let line = offset + 1
-            if rawLine.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                insideFence.toggle()
-                continue
-            }
-            // A `[[링크]]` inside a fenced example is documentation, not a link.
-            if insideFence { continue }
-
-            for name in wikiTargets(in: rawLine) {
+        for line in NoteProse.prose(text) {
+            for name in wikiTargets(in: line.text) {
                 record(Reference(fromPath: doc.url.path, fromTitle: doc.title, target: name,
-                                 kind: .wikilink, line: line, snippet: snippet(rawLine, hint: name)))
+                                 kind: .wikilink, line: line.number, snippet: snippet(line.text, hint: name)))
             }
-            for name in markdownTargets(in: rawLine) {
+            for name in markdownTargets(in: line.text) {
                 record(Reference(fromPath: doc.url.path, fromTitle: doc.title, target: name,
-                                 kind: .markdown, line: line, snippet: snippet(rawLine, hint: name)))
+                                 kind: .markdown, line: line.number, snippet: snippet(line.text, hint: name)))
             }
             guard let mention else { continue }
-            let ns = rawLine as NSString
-            for match in mention.matches(in: rawLine, range: NSRange(location: 0, length: ns.length)) {
+            let ns = line.text as NSString
+            for match in mention.matches(in: line.text, range: NSRange(location: 0, length: ns.length)) {
                 let hit = ns.substring(with: match.range).noteKey
                 guard allTitles.contains(hit) else { continue }
                 record(Reference(fromPath: doc.url.path, fromTitle: doc.title, target: hit,
-                                 kind: .mention, line: line, snippet: snippet(rawLine, hint: hit)))
+                                 kind: .mention, line: line.number, snippet: snippet(line.text, hint: hit)))
             }
         }
-        return Array(found.values)
+        return (Array(found.values), Tags.collect(text))
     }
 
     // MARK: - Extractors

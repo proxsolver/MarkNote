@@ -175,7 +175,7 @@ enum Markdown {
 
     /// A self-contained page used for preview and export.
     static func page(title: String, body: String, dark: Bool, docBaseURL: URL? = nil,
-                     bridge: Bool = false, visual: Visual = .off) -> String {
+                     bridge: Bool = false, visual: Visual = .off, printing: Bool = false) -> String {
         _ = docBaseURL
         var head = "<style>\(css(dark: dark))</style>"
         var tail = ""
@@ -193,6 +193,8 @@ enum Markdown {
         }
         // Last so these rules win over the vendored stylesheets above.
         if visual != .off { head += "\n<style>\(visualOverrides(dark: dark))</style>" }
+        // 인쇄 규칙도 마지막: 종이에서는 팔레트 대신 이 값들이 이깁니다.
+        if printing { head += "\n<style>\(PrintLayout.css)</style>" }
 
         return """
         <!DOCTYPE html>
@@ -264,6 +266,14 @@ enum Markdown {
         page(title: title, body: toHTML(source), dark: dark, docBaseURL: nil)
     }
 
+    /// 인쇄·PDF 전용 페이지. 화면 팔레트를 그대로 뽑으면 검은 배경에 얹은 옅은 글자가
+    /// 종이 위에서 사라지므로, 이 페이지만 언제나 라이트로 그리고 용지 규칙을 덧붙입니다.
+    static func printPage(title: String, body: String, docBaseURL: URL? = nil,
+                          visual: Visual = .off) -> String {
+        page(title: title, body: body, dark: false, docBaseURL: docBaseURL,
+             visual: visual, printing: true)
+    }
+
     /// Rewrites relative `src`/`href` values to absolute `file:` URLs so a page
     /// written outside the note folder (the browser preview) still finds images.
     static func absolutize(_ html: String, docURL: URL) -> String {
@@ -282,6 +292,87 @@ enum Markdown {
             result = (result as NSString).replacingCharacters(in: range, with: replacement)
         }
         return result
+    }
+
+    // MARK: - Images inside an export
+
+    /// Largest picture to base64 into one exported file. Beyond this the "document"
+    /// is really a download, and most cameras never get near it.
+    static let embedLimitEach = 8_000_000
+    /// … and the running total for one note, so a folder of phone photos cannot make
+    /// a 400 MB HTML file that no mail client will accept.
+    static let embedLimitTotal = 64_000_000
+
+    /// Image extensions we are willing to carry as a data URI. Anything else that
+    /// looks like a local file (a linked page, a PDF) is a *link*, not a picture,
+    /// and inlining it would hide it inside the prose.
+    static let embeddableTypes = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "svg"]
+
+    struct Embedded {
+        let html: String
+        let embedded: Int
+        /// A picture we saw but could not carry: too big, missing, or outside the
+        /// note's own folder. Its path is left in the file.
+        let kept: Int
+    }
+
+    /// Puts the pictures *into* the exported file, so a note that was moved to
+    /// `~/Desktop` or mailed to someone still shows them. Relative paths are
+    /// resolved against the note's own folder; `http`, `data` and fragments are
+    /// left exactly as they were, and a file that cannot be carried keeps its path
+    /// rather than silently disappearing.
+    static func embedImages(_ html: String, docURL: URL?,
+                            maxEach: Int = embedLimitEach, maxTotal: Int = embedLimitTotal) -> Embedded {
+        guard let dir = docURL?.deletingLastPathComponent(),
+              let re = try? NSRegularExpression(pattern: "(?i)\\bsrc=\"([^\"]+)\"") else {
+            return Embedded(html: html, embedded: 0, kept: 0)
+        }
+        let ns = html as NSString
+        var patches: [(NSRange, String)] = []
+        var embedded = 0, kept = 0, used = 0
+
+        for match in re.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
+            guard match.numberOfRanges == 2 else { continue }
+            let value = ns.substring(with: match.range(at: 1))
+            // Already self-contained, remote, an anchor, or served by the preview scheme.
+            if value.contains(":") || value.hasPrefix("/") || value.hasPrefix("#") { continue }
+            // `![a](assets/그%20파일.png)` is how a spaced filename survives Markdown,
+            // so the path we look up is the decoded one.
+            let decoded = value.removingPercentEncoding ?? value
+            guard embeddableTypes.contains((decoded as NSString).pathExtension.lowercased()) else { continue }
+            // A note that reaches above its own folder is the one case where carrying
+            // the picture would be worse than leaving it: an exported file is often
+            // mailed, and `../../` is how a note someone else sent you would slip a
+            // private picture into it. The preview scheme refuses the same paths.
+            if (decoded as NSString).pathComponents.contains("..") { kept += 1; continue }
+            let candidate = Vendor.resolve(under: dir, relative: decoded)
+            guard let source = candidate,
+                  let data = DocumentBytes.read(source, maxBytes: maxEach),
+                  used + data.count <= maxTotal,
+                  let mime = mimeType(forImage: source) else {
+                kept += 1
+                continue
+            }
+            used += data.count
+            embedded += 1
+            patches.append((match.range(at: 1), "data:\(mime);base64,\(data.base64EncodedString())"))
+        }
+
+        var result = html
+        for (range, replacement) in patches.reversed() {
+            result = (result as NSString).replacingCharacters(in: range, with: replacement)
+        }
+        return Embedded(html: result, embedded: embedded, kept: kept)
+    }
+
+    /// `Vendor.mimeType` answers `application/octet-stream` for anything it does not
+    /// know; a data URI with that type renders as a broken picture, so unknown
+    /// extensions are refused instead.
+    private static func mimeType(forImage url: URL) -> String? {
+        let ext = url.pathExtension.lowercased()
+        guard embeddableTypes.contains(ext) else { return nil }
+        let mime = Vendor.mimeType(for: url)
+        return mime.hasPrefix("image/") ? mime : nil
     }
 
     // MARK: - Blocks
@@ -501,6 +592,8 @@ enum Markdown {
         s = substitute(s, pattern: #"~~([^~]+)~~"#) { "<del>\($0[1] ?? "")</del>" }
         s = substitute(s, pattern: #"\{\{([^}]+)\}\}"#) { "<mark>\($0[1] ?? "")</mark>" }
 
+        s = tagChips(s)
+
         s = substitute(s, pattern: "\u{1F}C(\\d+)\u{1F}") { m in
             let idx = Int(m[1] ?? "0") ?? 0
             return "<code>\(idx < codes.count ? codes[idx] : "")</code>"
@@ -513,6 +606,37 @@ enum Markdown {
         }
 
         return s
+    }
+
+    /// `#태그`를 칩으로 바꿉니다. 인라인 규칙이 이미 만들어 놓은 HTML — 특히
+    /// `<a href="…">…</a>` 같은 링크 — 은 통째로 건너뛰고, 그 사이의 텍스트만 대상으로
+    /// 삼습니다. `escape(_:)`가 본문의 모든 `<`를 `&lt;`로 바꿔 놓았으니 이 단계에 남아
+    /// 있는 `<`는 우리가 만든 마크업뿐입니다. 그래서 "마크업 밖인지" 판단이 정규식 하나로 끝난다.
+    private static let htmlRunPattern = #"(?i)<a\b[^>]*>.*?</a>|</?[a-zA-Z][^>]*>"#
+
+    private static func tagChips(_ input: String) -> String {
+        guard let re = try? NSRegularExpression(pattern: htmlRunPattern) else { return input }
+        let ns = input as NSString
+        var out = ""
+        var last = 0
+        for match in re.matches(in: input, range: NSRange(location: 0, length: ns.length)) {
+            out += chips(in: ns.substring(with: NSRange(location: last,
+                                                        length: match.range.location - last)))
+            out += ns.substring(with: match.range)
+            last = match.range.location + match.range.length
+        }
+        out += chips(in: ns.substring(from: last))
+        return out
+    }
+
+    /// href는 문서 안 조각(`#tag-키`)입니다. 앱 안에서는 미리보기가 가로채 사이드바
+    /// 필터로 쓰고, 내보낸 파일에서는 그냥 아무 데도 안 가는 앵커라 파일이 깨지지 않습니다.
+    private static func chips(in text: String) -> String {
+        substitute(text, pattern: Tags.pattern) { m in
+            let name = m[1] ?? ""
+            guard !name.isEmpty else { return m[0] ?? "" }
+            return "<a class=\"tag\" href=\"#\(Tags.fragment(for: Tags.key(of: name)))\" data-tag=\"\(name)\">#\(name)</a>"
+        }
     }
 
     private static func escape(_ s: String) -> String {
@@ -580,6 +704,15 @@ enum Markdown {
         /* [[이름]]이 목록에 없는 노트를 가리킬 때: 회색 점선, 클릭하면 아무 일도 없습니다. */
         a.wikilink.unresolved { color: \(palette.mute); border-bottom: 1px dashed \(palette.mute); }
         a.wikilink.unresolved:hover { color: \(palette.accent); border-bottom-color: \(palette.accent); }
+        /* #태그 칩. 미리보기에서 클릭하면 사이드바 필터가 되고, 내보낸 파일에서는 문서 안 조각일 뿐입니다. */
+        a.tag {
+          color: \(palette.accent); background: \(dark ? "rgba(127,179,255,.14)" : "rgba(47,111,237,.09)");
+          border: 1px solid \(dark ? "rgba(127,179,255,.34)" : "rgba(47,111,237,.22)");
+          border-radius: 999px; padding: .04em .5em; margin: 0 .04em;
+          font-size: .87em; text-decoration: none; white-space: nowrap;
+        }
+        a.tag:hover { text-decoration: none; background: \(dark ? "rgba(127,179,255,.24)" : "rgba(47,111,237,.16)"); }
+        h1 a.tag, h2 a.tag, h3 a.tag, h4 a.tag { vertical-align: .12em; }
         strong { font-weight: 700; color: \(palette.strong); }
         em { font-style: italic; }
         del { color: \(palette.mute); }
@@ -616,6 +749,80 @@ enum Markdown {
         tr:nth-child(even) td { background: rgba(127,127,127,.035); }
         input[type=checkbox] { margin-right: .35em; }
         ::selection { background: \(dark ? "rgba(127,179,255,.32)" : "rgba(47,111,237,.18)"); }
+        """
+    }
+}
+
+/// 종이 위 레이아웃 — 인쇄와 PDF가 같은 수치를 쓰도록 한 곳에 모았습니다.
+///
+/// 화면용 `css(dark:)`는 미리보기 팔레트이고, 여기는 잉크 이야기입니다. 웹뷰가 이 폭으로
+/// 레이아웃되고, PDF 쪽 크기도 같은 값을 쓰므로 CSS 여백과 용지 여백이 어긋나지 않습니다.
+enum PrintLayout {
+    /// A4 세로, **CSS px** (96dpi). 1pt = 1/72인치, 1px = 1/96인치입니다.
+    ///
+    /// 단위부터 정해야 합니다. `createPDF`가 만드는 PDF의 눈금은 CSS 픽셀로 잡힙니다
+    /// (인쇄 CSS에서 `padding: 46pt`로 적으면 종이에 61눈금으로 앉아 있었다). 그래서
+    /// pt로 A4(595×842)를 그리고 뷰를 그 폭에 맞추면 글자가 종이 대비 1.33배 커지고
+    /// 여백도 어긋납니다. A4를 px로 적고(px→pt는 0.75배) 여백까지 px로 통일하면
+    /// 종이의 비율·글자 크기·여백이 의도한 그대로 나옵니다.
+    static let pageWidth: CGFloat = 794
+    static let pageHeight: CGFloat = 1123
+    /// 종이의 네 가장자리. 좌우 62px ≒ 46.5pt, 상하 60px ≒ 45pt.
+    static let sideMargin: CGFloat = 62
+    static let topMargin: CGFloat = 60
+
+    static var contentWidth: CGFloat { pageWidth - sideMargin * 2 }
+    /// 한 쪽에 잉크가 앉을 수 있는 세로 폭.
+    static var contentHeight: CGFloat { pageHeight - topMargin * 2 }
+    static var layoutSize: CGSize { CGSize(width: pageWidth, height: pageHeight) }
+    static var pageRect: CGRect { CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight) }
+
+    /// 실제 프린터에 넘길 NSPrintInfo는 pt를 쓰므로 숫자를 다시 환산합니다.
+    static func toPoints(_ px: CGFloat) -> CGFloat { px * 72 / 96 }
+
+    /// 인쇄 규칙. 화면 팔레트보다 나중에 들어오므로 언제나 이쪽이 이깁니다.
+    ///
+    /// 여백은 `@page`가 아니라 `html`의 padding 한 곳에만 적습니다. PDF를 만들 때는
+    /// `@page`가 먹지 않고(종이 눈금만 정해집니다), 실제 인쇄에서는 padding이 종이의
+    /// 여백이 됩니다. 두 갈래가 같은 숫자를 한 번만 쓰라는 뜻이고, 스크롤바가 폭을
+    /// 갉아먹지 않게 숨깁니다 — 안 그러면 오른쪽 여백만 17px 어색해집니다.
+    static var css: String {
+        """
+        @page { size: \(Int(pageWidth))px \(Int(pageHeight))px; margin: 0; }
+        :root { color-scheme: light; }
+        html {
+          background: #ffffff; padding: \(Int(topMargin))px \(Int(sideMargin))px;
+          overflow: hidden;
+        }
+        body {
+          margin: 0; padding: 0; background: #ffffff !important; color: #16181d;
+          font-size: 11.5pt; line-height: 1.62;
+          -webkit-print-color-adjust: exact; print-color-adjust: exact;
+        }
+        ::-webkit-scrollbar { display: none; width: 0; height: 0; }
+        .markdown-body { max-width: none; }
+        h1 { font-size: 1.5em; } h2 { font-size: 1.26em; } h3 { font-size: 1.1em; } h4 { font-size: 1em; }
+        h1, h2, h3, h4 { break-after: avoid; }
+        p, li { orphans: 2; widows: 2; }
+        pre, blockquote, table, img, .mermaid, hr { break-inside: avoid; }
+        thead { display: table-header-group; }
+        a { color: #1a4fbf; }
+        a.wikilink.unresolved { color: #5a5f6a; border-bottom-color: #b3b8c2; }
+        a.tag {
+          color: #22314f; background: #eef1f6; border-color: #c9cdd6;
+          -webkit-print-color-adjust: exact; print-color-adjust: exact;
+        }
+        code { background: #f5f6f8 !important; color: #16181d; border-radius: 3px; }
+        pre { background: #f7f8fa !important; border: 1px solid #d7dae1; }
+        pre code { background: none !important; }
+        .hljs { background: transparent !important; color: inherit; }
+        blockquote { color: #3c4048; background: #f6f7f9; border-left-color: #9aa0ad; }
+        th { background: #f1f3f6 !important; }
+        th, td { border-color: #c9cdd6; }
+        hr { border-top-color: #c9cdd6; }
+        mark { background: #ffe9a8 !important; color: #16181d; }
+        img { max-width: 100%; }
+        .katex { color: #16181d; }
         """
     }
 }

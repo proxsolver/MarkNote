@@ -1,4 +1,5 @@
 import AppKit
+import Quartz
 import UniformTypeIdentifiers
 
 struct Doc: Hashable, Identifiable {
@@ -187,12 +188,21 @@ final class Store: NSObject {
     // MARK: - Filtered list
 
     var visibleDocs: [Doc] {
+        var list = docs
+        // 태그 필터가 걸려 있으면 그 태그를 단 노트만 남깁니다(사전 조회, O(노트 수)).
+        if let key = tagFilter {
+            let owning = tagIndex.paths(tagged: key)
+            list = list.filter { owning.contains($0.url.path.pathKey) }
+        }
         let q = search.trimmingCharacters(in: .whitespaces).noteKey
-        guard !q.isEmpty else { return docs }
+        guard !q.isEmpty else { return list }
         // Both sides normalised: the volume stores Hangul names decomposed, the
         // search field types them composed, and a raw `contains` finds nothing.
-        return docs.filter { $0.fileName.noteKey.contains(q) || $0.title.noteKey.contains(q) }
+        return list.filter { $0.fileName.noteKey.contains(q) || $0.title.noteKey.contains(q) }
     }
+
+    /// 태그까지 함께 좁힌 결과 — 사이드바 하단 카운트가 "이 태그 안에서"를 보여 준다.
+    var filteredByTag: Bool { tagFilter != nil }
 
     var recents: [Doc] {
         (defaults.stringArray(forKey: Keys.recents) ?? [])
@@ -331,6 +341,17 @@ final class Store: NSObject {
     /// Other notes that point at a note, plus everything the open note points to.
     private(set) var linkIndex = LinkIndex()
 
+    /// `#태그` 인덱스. 참조와 한 번의 훑기를 공유하므로 `.links`와 함께 갱신됩니다.
+    private(set) var tagIndex = TagIndex()
+
+    /// 사이드바를 이 태그를 단 노트만 보여주도록 좁힌다. nil이면 전체.
+    var tagFilter: String? {
+        didSet {
+            guard tagFilter != oldValue else { return }
+            emit(.docs)
+        }
+    }
+
     private let refScanner = ReferenceScanner()
 
     /// 어떤 노트를 가리키는 이름인지 다른 노트들이 얼마나 참조하는지.
@@ -338,16 +359,86 @@ final class Store: NSObject {
     func backlinks(toTarget name: String) -> [Reference] { linkIndex.backlinks(to: name.noteKey) }
     func outgoingLinks(from doc: Doc) -> [Reference] { linkIndex.outgoing(from: doc.url.path) }
 
-    /// 폴더를 한 번 훑어 참조 인덱스를 다시 만듭니다. 읽기는 백그라운드, 방출은
+    /// 폴더를 한 번 훑어 참조·태그 인덱스를 다시 만듭니다. 읽기는 백그라운드, 방출은
     /// 메인 — 이전에 크래시로 배운 대로 뷰를 건드리는 순간은 메인뿐입니다.
     func refreshReferences() {
         let list = docs
         let stamps = dates
-        refScanner.refresh(docs: list, dates: stamps) { [weak self] built in
+        refScanner.refresh(docs: list, dates: stamps) { [weak self] scan in
             guard let self else { return }
-            self.linkIndex = built
+            self.linkIndex = scan.links
+            self.tagIndex = scan.tags
+            // 사라진 태그로 필터가 걸려 있으면 목록이 빈 채로 남으니 스스로 풀립니다.
+            if let key = self.tagFilter, self.tagIndex.tag(key) == nil { self.tagFilter = nil }
             self.emit(.links)
         }
+    }
+
+    // MARK: - Tags
+
+    /// 열려 있는 노트의 태그. 인덱스는 디스크를 읽으니 저장 전 본문보다 한 박자 늦습니다.
+    func tags(for doc: Doc) -> [Tag] {
+        tagIndex.keys(forPath: doc.url.path).compactMap { tagIndex.tag($0) }
+    }
+
+    var currentTags: [Tag] { current.map { tags(for: $0) } ?? [] }
+
+    /// 같은 칩을 다시 누르면 필터가 풀린다(검색창과 같은 논리).
+    func toggleTag(_ key: String) {
+        let k = Tags.key(of: key)
+        tagFilter = (tagFilter == k) ? nil : k
+        guard let tag = tagFilter.flatMap({ tagIndex.tag($0) }) else {
+            toast = "태그 필터 해제"
+            return
+        }
+        toast = "#\(tag.name) · \(tag.count)개 노트"
+    }
+
+    func clearTagFilter() { tagFilter = nil }
+
+    /// 사이드바 상단 칩: 필터 중이거나 태그가 있을 때만 보여 준다.
+    var tagChips: [Tag] { tagIndex.sorted }
+
+    // MARK: - Mention promotion (제목 언급 → 위키링크)
+
+    /// 열려 있는 노트 본문에 그냥 적힌 다른 노트 제목을 `[[위키링크]]`로 바꿉니다.
+    ///
+    /// 편집기 텍스트를 한 단계로 갈아쓰므로 ⌘Z 한 번으로 통째로 되돌아가고, 저장 직전
+    /// 바이트는 히스토리에 그대로 쌓입니다. 대상은 사이드바 목록(= 이 폴더의 노트)이고,
+    /// 지금 열려 있는 노트 스스로는 빼립니다.
+    @discardableResult
+    func promoteMentions() -> Int {
+        guard let doc = current else {
+            toast = "노트를 먼저 열어 주세요 — 그 노트의 언급을 바꿉니다"
+            return 0
+        }
+        guard let tv = editor, tv.isEditable else {
+            toast = "편집기를 쓸 수 없습니다"
+            return 0
+        }
+        let plan = Promotion.plan(text: tv.string,
+                                  titles: docs.filter { $0.url.path != doc.url.path }.map(\.title),
+                                  excluding: doc.title)
+        guard plan.changed else {
+            toast = "링크로 바꿀 제목 언급이 없습니다 — 다른 노트 이름 \(Promotion.minTitleLength)자 이상만 봅니다"
+            return 0
+        }
+        let caret = Promotion.caret(tv.selectedRange().location, after: plan.hits)
+        let restored = NSRange(location: min(caret, (plan.text as NSString).length), length: 0)
+        Editing.replace(tv, NSRange(location: 0, length: (tv.string as NSString).length), plan.text,
+                        selection: restored, undoLabel: "언급을 위키링크로")
+        editorChanged(plan.text)
+        let notes = Set(plan.hits.map(\.title)).count
+        toast = "언급 \(plan.hits.count)개를 위키링크로 바꿨습니다 · 노트 \(notes)개 · ⌘Z로 되돌리기"
+        return plan.hits.count
+    }
+
+    /// 승격할 곳이 얼마나 남았는지. 메뉴에 수를 적어두면 무엇을 누르는지 알립니다.
+    var promotableCount: Int {
+        guard let doc = current else { return 0 }
+        return Promotion.plan(text: text,
+                              titles: docs.filter { $0.url.path != doc.url.path }.map(\.title),
+                              excluding: doc.title).count
     }
 
     /// `[[이름]]` 대상 찾기. 확장자 유무·대소문자·빈칸 차이에는 상관없이, 또 서브폴더에
@@ -829,6 +920,15 @@ final class Store: NSObject {
         saveExport(visual: .inlined)
     }
 
+    /// The document both export paths hand to the save panel: one HTML file that
+    /// carries its own pictures, so moving it to the Desktop or mailing it no longer
+    /// breaks the images. `kept` counts the ones that stayed as a folder path.
+    func exportedHTML(for doc: Doc, visual: Markdown.Visual) -> Markdown.Embedded {
+        let page = Markdown.page(title: doc.title, body: Markdown.toHTML(text),
+                                 dark: Theme.isDark, docBaseURL: doc.url, visual: visual)
+        return Markdown.embedImages(page, docURL: doc.url)
+    }
+
     private func saveExport(visual: Markdown.Visual) {
         guard let doc = current else { return }
         flush()
@@ -836,17 +936,19 @@ final class Store: NSObject {
         panel.allowedContentTypes = [.html]
         panel.nameFieldStringValue = doc.title + ".html"
         panel.directoryURL = doc.url.deletingLastPathComponent()
-        if visual != .off {
-            panel.message = "그림·수식을 HTML 안에 직접 포함합니다 (약 4MB, 이미지는 문서 폴더에 둘 때만 열립니다)"
-        }
+        panel.message = visual == .inlined
+            ? "렌더러와 사진을 HTML 한 파일에 모두 담습니다 (약 4MB + 사진)"
+            : "사진을 HTML 한 파일에 함께 담습니다"
         present(panel) { [weak self] url in
             guard let self, let url else { return }
-            let html = Markdown.page(title: doc.title, body: Markdown.toHTML(self.text),
-                                     dark: Theme.isDark, docBaseURL: doc.url, visual: visual)
+            let out = self.exportedHTML(for: doc, visual: visual)
             do {
-                try html.write(to: url, atomically: true, encoding: .utf8)
+                try out.html.write(to: url, atomically: true, encoding: .utf8)
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-                self.toast = "HTML 내보냄 · \(url.lastPathComponent) · \(ByteCount(size))"
+                var note = "HTML 내보냄 · \(url.lastPathComponent) · \(ByteCount(size))"
+                if out.embedded > 0 { note += " · 사진 \(out.embedded)장 동봉" }
+                if out.kept > 0 { note += " · 사진 \(out.kept)장은 폴더 경로 그대로" }
+                self.toast = note
             } catch {
                 self.toast = "내보내기 실패: \(error.localizedDescription)"
             }
@@ -874,6 +976,54 @@ final class Store: NSObject {
         pb.clearContents()
         pb.setString(text, forType: .string)
         toast = "원문을 복사했습니다"
+    }
+
+    // MARK: - Print / PDF
+
+    /// 뽑을 때 쓸 렌더링. 미리보기에서 머메이드·수식을 켰다면 종이에서도 돕니다(라이트로).
+    private var printVisual: Markdown.Visual {
+        (visualEnabled && Vendor.available) ? .preview : .off
+    }
+
+    /// 인쇄 패널을 띄웁니다. 화면이 다크여도 종이는 언제나 라이트로 나갑니다.
+    func printCurrent() {
+        guard let doc = current else { return }
+        flush()
+        toast = "인쇄용 페이지를 그리는 중…"
+        PrintBridge.shared.printNote(doc: doc, text: text, visual: printVisual) { [weak self] message in
+            self?.toast = message ?? "인쇄 패널을 열었습니다 · 용지 A4 세로"
+        }
+    }
+
+    /// A4 PDF로 저장. 쪽이 길면 여러 쪽으로 나누고, 그림·다이어그램까지 하나의 파일에 담습니다.
+    func exportPDF() {
+        guard let doc = current else { return }
+        flush()
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.nameFieldStringValue = doc.title + ".pdf"
+        panel.directoryURL = doc.url.deletingLastPathComponent()
+        panel.message = "노트를 A4 쪽으로 나눠 PDF로 저장합니다 — 사진과 다이어그램이 함께 들어갑니다"
+        present(panel) { [weak self] url in
+            guard let self, let url else { return }
+            self.toast = "PDF로 그리는 중…"
+            PrintBridge.shared.exportPDF(doc: doc, text: self.text, visual: self.printVisual) { result in
+                switch result {
+                case .success(let data):
+                    do {
+                        try data.write(to: url, options: .atomic)
+                        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? data.count
+                        // 쪽 수가 눈에 보이면 "정말 여러 장으로 나갔나"를 확인하지 않아도 됩니다.
+                        let pages = PDFDocument(data: data)?.pageCount ?? 0
+                        self.toast = "PDF 내보냄 · \(url.lastPathComponent) · \(pages)쪽 · \(ByteCount(size))"
+                    } catch {
+                        self.toast = "PDF 저장 실패: \(error.localizedDescription)"
+                    }
+                case .failure(let problem):
+                    self.toast = problem.message
+                }
+            }
+        }
     }
 
     func copyHTML() {

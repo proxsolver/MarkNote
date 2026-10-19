@@ -143,6 +143,10 @@ enum MainMenu {
         add(menu, "시각화 포함 HTML 내보내기…", #selector(MainController.exportHTMLRich(_:)), "e", [.command, .shift, .option])
         add(menu, "브라우저로 미리보기", #selector(MainController.openInBrowser(_:)), "b", [.command, .shift])
         add(menu, "HTML로 복사", #selector(MainController.copyHTML(_:)), "c", [.command, .shift, .option])
+        menu.addItem(.separator())
+        // 종이로 나가는 두 갈래. 둘 다 인쇄용 라이트 팔레트를 씁니다(⌘P는 시스템 표준 자리).
+        add(menu, "인쇄…", #selector(MainController.printNote(_:)), "p")
+        add(menu, "PDF로 내보내기…", #selector(MainController.exportPDF(_:)), "p", [.command, .shift])
         return item
     }
 
@@ -179,6 +183,7 @@ enum MainMenu {
         add(menu, "코드 블록", #selector(MainController.codeBlockText(_:)), "k", [.command, .shift])
         add(menu, "링크", #selector(MainController.insertLink(_:)), "k")
         add(menu, "위키 링크 [[노트]]", #selector(MainController.insertWikiLink(_:)), "k", [.command, .option])
+        add(menu, "제목 언급을 위키링크로", #selector(MainController.promoteMentions(_:)), "m", [.command, .option])
         menu.addItem(.separator())
         add(menu, "제목 1", #selector(MainController.heading1(_:)), "1")
         add(menu, "제목 2", #selector(MainController.heading2(_:)), "2")

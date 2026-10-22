@@ -32,6 +32,21 @@ cd MarkNote
 | `./build.sh --install` | `~/Applications`에 설치 |
 | `./build.sh --install --open` | 설치 후 실행 |
 
+## 앱 아이콘
+
+아이콘은 그림 파일이 아니라 `tools/make-icon.swift`가 코드로 그립니다. 색은 편집기와 짝을 이룹니다 — 종이는 언제나 라이트한 흰색, M↓의 본체는 링크 색(짙은 잉크 파랑), 화살표와 접힌 뒷면은 강조 색(앰버).
+
+```bash
+swift tools/make-icon.swift            # Resources/AppIcon.icns 갱신(16px~1024px 10 크기)
+swift tools/make-icon.swift --check    # .icns 에 크기가 모두 살아있는지 확인
+swift tools/make-icon.swift --keep     # 임시 아이컨셋을 남겨 PNG를 눈으로 볼 때
+./build.sh --install --open            # 번들에 복사되어 적용됨
+```
+
+`build.sh`는 `Resources/AppIcon.icns`가 있으면 번들에 복사하고, `Info.plist`의 `CFBundleIconFile = AppIcon`이 그 이름을 가리킵니다. Xcode나 에셋 카탈로그는 필요 없습니다.
+
+그릴 때 격자 하나만은 직접 잰 값을 따릅니다. 도형이 캔버스(1024)에 붙어야 합니다 — 애플 시스템 아이콘처럼 여백을 20% 두고 그리면 macOS가 "격자에 맞지 않는 아이콘"으로 보고 회색 받침에 얹어 줄여 표시합니다(128px에서 확인). 모서리 비율은 Notes/TextEdit .icns를 쪼갠 값(런 0.208, 슈퍼타원 지수 4.4)을 씁니다.
+
 ## 기능
 
 - **사이드바 목록** — 지정 폴더(하위 폴더 포함)의 `.md` / `.markdown` / `.mdown` 파일을 나열. 검색, 이름 변경, 휴지통으로 삭제, 드래그＆드롭으로 파일·폴더 추가.
@@ -518,11 +533,13 @@ Sources/
   Editing.swift        서식 명령, Enter/Tab 동작 등 편집 로직
   Theme.swift          동적 컬러, 폰트, 원문 구문 하이라이트 규칙
   Utils.swift, Welcome.swift
+Resources/AppIcon.icns 앱 아이콘(16·32·64·128·256·512·1024, 10 레파)
 Resources/vendor/      mermaid · highlight.js · KaTeX 사본 + 웹폰트 + 라이선스 (3.9 MB)
+tools/make-icon.swift  아이콘 생성기 — 코드로 그려 .icns 로 묶는다(swift tools/make-icon.swift)
 docs/screenshot.png    README 미리보기 이미지
 docs/예제-모음.md      복사해서 쓰는 예제 원문(그대로 열 수도 있는 노트)
-Info.plist             문서 타입 등록(.md, .markdown, .mdown)
-build.sh               컴파일 → 벤더 복사 → 서명 → 설치
+Info.plist             문서 타입 등록(.md, .markdown, .mdown), CFBundleIconFile
+build.sh               컴파일 → 벤더 복사 → 아이콘 복사 → 서명 → 설치
 ```
 
 ## 알려진 제한
